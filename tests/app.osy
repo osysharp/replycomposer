@@ -1,0 +1,12 @@
+// The producer's test project for Osysharp.ReplyComposer — a building's maintenance desk: tenants report what is broken,
+// staff answer them with a composer, from saved replies and macros. NOT a helpdesk on purpose: the kit knows nothing
+// of tickets, and this app answers "requests" with its own reply rows, its own statuses and its own labels.
+app ComposerKitTests {
+  model "model/**/*.osy";
+  tests "**/*.test.osy";
+  use Osysharp.Identity@0;
+  use Osysharp.ReplyComposer@0;
+  use Osysharp.Storage;
+  use Osysharp.Ui;
+}
+

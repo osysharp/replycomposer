@@ -1,0 +1,76 @@
+namespace ComposerKitTests;
+
+using Osysharp.ReplyComposer;
+
+// The desk's pages: the requests, one request with its replies and the composer at its foot, and the two settings
+// pages the kit fills.
+
+[Title("Requests")]
+[Route("/")]
+[Authorize(IsStaff)]
+[Render(CSR)]
+component Requests() {
+  live var requests = Request.OrderBy(r => r.Number).ToList();
+  render {
+    Stack(gap: 3, p: 5, maxW: "760px") {
+      Text("Requests", fontSize: FontSize.Heading, fontWeight: FontWeight.Semibold);
+      if (requests.Count == 0) { EmptyState("Nothing reported", body: "Requests from tenants arrive here."); }
+      foreach (var r in requests) {
+        Link(href: "/request/" + r.Number, color: Colors.OnSurface) {
+          Row(gap: 2) {
+            Text("#" + r.Number, fontFamily: Font.Mono, color: Colors.TextMuted);
+            Text(r.Title);
+          }
+        }
+      }
+    }
+  }
+}
+
+/// One request: what was reported, the replies, and the composer at the foot.
+[Title("Request")]
+[Route("/request/{number}")]
+[Authorize(IsStaff)]
+[Render(CSR)]
+component RequestPage(int number) {
+  live var requests = Request.Where(r => r.Number == number).ToList();
+  live var replies = RequestReply.Where(x => x.Request.Number == number).OrderBy(x => x.At).ToList();
+  live var answered = RequestReply.Count(x => x.Request.Number == number && !x.Note);
+
+  render {
+    Stack(gap: 0, minH: "100dvh", bg: Colors.Bg) {
+      foreach (var r in requests) {
+        Stack(gap: 1, px: 5, py: 4, bg: Colors.Surface, borderBW: 1, border: Colors.Border, label: "Request") {
+          Row(gap: 2, align: Align.Center, wrap: Wrapping.Wrap) {
+            Text("#" + r.Number, fontFamily: Font.Mono, color: Colors.TextMuted, fontSize: FontSize.Label);
+            Text(r.Title, fontSize: FontSize.Heading, fontWeight: FontWeight.Semibold);
+            Badge(r.Status.Label, tone: r.Status == RequestStatus.Done ? Tone.Success : Tone.Ghost);
+            if (r.Labels != "") { Text(r.Labels, fontSize: FontSize.Caption, color: Colors.TextMuted, fontFamily: Font.Mono); }
+          }
+          Text("From " + r.TenantName + (r.Unit != "" ? ", flat " + r.Unit : ""), color: Colors.TextMuted, fontSize: FontSize.Label);
+        }
+        Stack(gap: 3, px: 5, py: 4, grow: 1, maxW: "880px", w: "100%", label: "Replies") {
+          if (replies.Count == 0) { Text("No replies yet.", color: Colors.TextMuted, fontSize: FontSize.Label); }
+          foreach (var x in replies) {
+            Stack(gap: 1, px: 4, py: 3, rounded: Radius.Lg, borderW: 1, border: x.Note ? Colors.Warning.Muted : Colors.Border,
+                  bg: x.Note ? Colors.Warning.Subtle : Colors.Surface, label: (x.Note ? "Note from " : "Reply from ") + x.By) {
+              Text(x.By + (x.Note ? " · internal note" : ""), fontWeight: FontWeight.Semibold, fontSize: FontSize.Label);
+              Markdown(x.Text);
+              if (x.Files > 0) { Text(x.Files + " file(s)", fontSize: FontSize.Caption, color: Colors.TextMuted); }
+            }
+          }
+        }
+        Box(px: 5, pt: 3, pb: 4, bg: Colors.Surface, borderTW: 1, border: Colors.Border, position: Position.Sticky, bottom: "0") {
+          Box(maxW: "880px") {
+            Composer(r.Id, audience: "To " + r.TenantName + " · by mail", seen: answered, manageAt: "/settings/replies",
+                     keymap: new ComposerKeys { Reply = "R", Note = "N", Macro = "Shift+M" });
+          }
+        }
+      }
+      KeyboardSheet();
+    }
+  }
+}
+
+// The settings pages are the kit's own (`ComposerRepliesSettings`, `ComposerMacroSettings`), in the Ui kit's
+// `SettingsFrame` — announced through `ComposerSettingsSections`.

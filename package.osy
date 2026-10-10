@@ -1,0 +1,41 @@
+// Osysharp.ReplyComposer — where a person writes a reply: saved replies with placeholders filled from the record, macros that
+// run the app's own `[Action]`s, markdown formatting, a draft that survives a reload, a signature, files, and "send and set…".
+//
+// The kit never knows WHAT is being answered — a ticket, a case, an order, a lead. A composer is pointed at a record by
+// its id (`Composer(item: t.Id)`), and the app says, once, what sending means for that kind of record:
+//     app.Composer = new ComposerSetup { Targets = [new DeskReplies()] };
+//     public class DeskReplies : ComposerTarget { public override string Send(ComposerSend s) { … } }
+// Everything the kit knows about the record it learns from that class: the placeholders a reply may use (each a class
+// that fills itself from the record), the record a macro's steps act on (`Record` — its steps are the app's `[Action]`s on it), the "send and set"
+// choices, the writer's signature, and how a file is kept.
+//
+// ⚑ TYPED, NEVER A STRING TEMPLATE THE WRITER CAN BREAK. A placeholder is `{{customer.first_name}}` in a saved reply
+//   only because the app DECLARED that key, with a class that fills it: a reply naming a key nobody declared is refused
+//   when it is saved, naming every key there is; a placeholder the record cannot fill (a customer with no name) stays
+//   in the text, marked, and the send is refused until the writer replaces it — "Hi ," never reaches a customer.
+//   A macro step is one of the app's `[Action]`s with a choice it offers; a step whose choice has gone (a deleted status)
+//   says so when the macro is applied, rather than being skipped.
+//
+// ⚑ A DRAFT IS THE WRITER'S OWN. Saved as they write (every two seconds while it changes), per record and per author,
+//   with its files and its staged macro steps; nobody else reads it — the rules, not the page, see to that. A draft
+//   PREPARED by someone else (an assistant, a colleague handing over — `PrepareDraft`) waits on the record and is
+//   offered to the writer, never sent by itself.
+//
+// ⚑ THE APP SAYS TWO THINGS:
+//     policy ComposesReplies => IsAgent;        // who writes here: reads the team's replies and macros, keeps drafts
+//     policy ManagesSavedReplies => IsAdmin;    // who writes the TEAM's replies and macros (anyone may keep their own)
+package Osysharp.ReplyComposer {
+  version "0.6.3";
+  minPlatform "0.9.0";
+  summary     "where a person writes a reply to any record — saved replies with typed placeholders filled from the record (an unknown key refused when saved, an unfillable one refused at send), macros that stage the app's own verbs and run them with the send, markdown formatting with a bar and keys that act on the selection, drafts saved per record and per author that survive a reload (and a seam for a draft prepared by someone else), the writer's signature, files pasted, dropped or picked, and 'send and set…' as the app's choice.";
+  model "model/**/*.osy";
+  // The personal data its own fields hold (`[Classification(Personal.X)]`): an app maps a level onto its own
+  // classification, or leaves it to each row's own security.
+  personal Content;
+  use Osysharp.Identity@0;
+  // Files a writer adds are stored as their own until sent.
+  use Osysharp.Storage;
+  // The composer, its menus and its settings pages — themed by the app.
+  use Osysharp.Ui;
+  tests "tests";
+}

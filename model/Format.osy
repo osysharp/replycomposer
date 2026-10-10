@@ -1,0 +1,157 @@
+namespace Osysharp.ReplyComposer;
+
+// FORMATTING — markdown, written by a bar and by keys that act on the writer's SELECTION (`TextArea(selectionStart:,
+// selectionEnd:)`). Each is a pure edit: the text and the selection in, the text and where the selection lands out —
+// so it runs in the browser with no round trip, and a test can state exactly what Bold does to "hello world".
+//
+// ⚑ A SECOND PRESS UNDOES THE FIRST. Bold on words already in `**` takes the `**` off; a list on lines that are all
+//   already items takes the markers off. A bar whose buttons only ever add is a bar that leaves `****` behind.
+
+/// A text and a selection — what a formatting edit takes and answers.
+public class TextEdit {
+  public string Text = "";
+  public int From;
+  public int To;
+}
+
+int Clamp(int n, int length) { return n < 0 ? 0 : (n > length ? length : n); }
+
+/// Wrap the selection in `mark` (`**` bold, `_` italic, `` ` `` code) — or unwrap it, when it already is. With nothing
+/// selected, writes the marks around `word` and selects it, so typing replaces it.
+public TextEdit Wrap(string text, int from, int to, string mark, string word) {
+  var a = Clamp(Math.Min(from, to), text.Length);
+  var b = Clamp(Math.Max(from, to), text.Length);
+  var m = mark.Length;
+  // Already wrapped — the marks sit just outside the selection: take them off.
+  if (a >= m && b + m <= text.Length && text.Substring(a - m, m) == mark && text.Substring(b, m) == mark) {
+    return new TextEdit { Text = text.Substring(0, a - m) + text.Substring(a, b - a) + text.Substring(b + m),
+                          From = a - m, To = b - m };
+  }
+  // …or the selection includes them.
+  if (b - a >= 2 * m && text.Substring(a, m) == mark && text.Substring(b - m, m) == mark) {
+    return new TextEdit { Text = text.Substring(0, a) + text.Substring(a + m, b - a - 2 * m) + text.Substring(b),
+                          From = a, To = b - 2 * m };
+  }
+  var inner = a == b ? word : text.Substring(a, b - a);
+  return new TextEdit { Text = text.Substring(0, a) + mark + inner + mark + text.Substring(b),
+                        From = a + m, To = a + m + inner.Length };
+}
+
+/// The selection as a link: `[words](https://)` with the address selected to type over. With nothing selected the
+/// words are "link". A selection that IS an address becomes the address of a link whose words are selected.
+public TextEdit Linked(string text, int from, int to) {
+  var a = Clamp(Math.Min(from, to), text.Length);
+  var b = Clamp(Math.Max(from, to), text.Length);
+  var picked = text.Substring(a, b - a);
+  if (picked.StartsWith("http://") || picked.StartsWith("https://")) {
+    var made = "[link](" + picked + ")";
+    return new TextEdit { Text = text.Substring(0, a) + made + text.Substring(b), From = a + 1, To = a + 5 };
+  }
+  var words = picked == "" ? "link" : picked;
+  var link = "[" + words + "](https://)";
+  var urlAt = a + words.Length + 3;
+  return new TextEdit { Text = text.Substring(0, a) + link + text.Substring(b), From = urlAt, To = urlAt + 8 };
+}
+
+/// Start every line the selection touches with `marker` ("- " a bullet, "1. " numbered, "> " a quote) — or take it off
+/// every one, when they all have it already. Numbered lines count up.
+public TextEdit Lines(string text, int from, int to, string marker) {
+  var a = Clamp(Math.Min(from, to), text.Length);
+  var b = Clamp(Math.Max(from, to), text.Length);
+  var start = a == 0 ? 0 : text.LastIndexOf("\n", a - 1) + 1;
+  var endAt = text.IndexOf("\n", b);
+  var end = endAt < 0 ? text.Length : endAt;
+  var block = text.Substring(start, end - start);
+  var lines = block.Split("\n").ToList();
+  var numbered = marker == "1. ";
+  var all = lines.All(l => numbered ? IsNumbered(l) : l.StartsWith(marker));
+  List<string> made = [];
+  var n = 1;
+  foreach (var l in lines) {
+    if (all) { made.Add(numbered ? l.Substring(l.IndexOf(". ") + 2) : l.Substring(marker.Length)); }
+    else { made.Add((numbered ? n + ". " : marker) + l); n = n + 1; }
+  }
+  var joined = string.Join("\n", made);
+  // An empty line made into an item leaves the caret after its marker, ready to type.
+  var caret = a == b ? start + joined.Length : start;
+  return new TextEdit { Text = text.Substring(0, start) + joined + text.Substring(end), From = a == b ? caret : start,
+                        To = start + joined.Length };
+}
+
+/// "12. " at the start of `line`.
+bool IsNumbered(string line) {
+  var dot = line.IndexOf(". ");
+  if (dot <= 0) { return false; }
+  for (var i = 0; i < dot; i++) { if (!char.IsDigit(line[i])) { return false; } }
+  return true;
+}
+
+/// Put `words` where the selection is — replacing it — with a blank line around it when it lands among other words,
+/// and the caret after it. Into an empty box it is simply the text.
+public TextEdit Insert(string text, int from, int to, string words) {
+  var a = Clamp(Math.Min(from, to), text.Length);
+  var b = Clamp(Math.Max(from, to), text.Length);
+  if (text.Trim() == "") { return new TextEdit { Text = words, From = words.Length, To = words.Length }; }
+  var before = text.Substring(0, a);
+  var after = text.Substring(b);
+  var lead = before == "" || before.EndsWith("\n\n") ? "" : (before.EndsWith("\n") ? "\n" : "\n\n");
+  var trail = after == "" || after.StartsWith("\n\n") ? "" : (after.StartsWith("\n") ? "\n" : "\n\n");
+  var made = before + lead + words + trail + after;
+  var caret = before.Length + lead.Length + words.Length;
+  return new TextEdit { Text = made, From = caret, To = caret };
+}
+
+// ── mentions (0.4.0) ───────────────────────────────────────────────────────────────────────────────────────────────────
+//
+// A note names a colleague by writing `@` and their name — `@Ines Moreau` — picked from what `ComposerTarget.Mentionable`
+// offers as the writer types, or written out by hand. Both are found the same way when the note is sent (`Names`), so a
+// name typed without the menu is a mention too.
+
+/// A mention being typed: where its `@` is, and what follows it up to the caret.
+public class MentionTyping {
+  public bool Active;
+  public int At;
+  /// "ine" — what the writer typed after the `@` so far.
+  public string Query = "";
+}
+
+/// Is the writer typing a mention at `caret`? An `@` at the start of the text or after a space, a line break or "(",
+/// with at most three words after it on the same line — so an address (`ines@harbour.se`) is never one.
+public MentionTyping MentionAt(string text, int caret) {
+  var c = Clamp(caret, text.Length);
+  var before = text.Substring(0, c);
+  var at = before.LastIndexOf("@");
+  if (at < 0) { return new MentionTyping(); }
+  if (at > 0 && !char.IsWhiteSpace(before[at - 1]) && before[at - 1] != '(') { return new MentionTyping(); }
+  var query = before.Substring(at + 1);
+  if (query.Contains("\n") || query.Length > 40 || query.Split(" ").Length > 3) { return new MentionTyping(); }
+  return new MentionTyping { Active = true, At = at, Query = query };
+}
+
+/// The writer picked `name` for the mention they were typing: `@name ` replaces the `@` and what followed it, and the
+/// caret lands after the space.
+public TextEdit PickMention(string text, int caret, MentionTyping typing, string name) {
+  var c = Clamp(caret, text.Length);
+  var made = text.Substring(0, typing.At) + "@" + name + " " + text.Substring(c);
+  var after = typing.At + name.Length + 2;
+  return new TextEdit { Text = made, From = after, To = after };
+}
+
+/// Does `text` name `name` — `@Ines Moreau`, in any case — as a whole name: not inside an address (`x@ines.se`), and
+/// not the start of a longer one (`@Ines Moreau-Berg` names somebody else).
+public bool Names(string text, string name) {
+  if (name.Trim() == "") { return false; }
+  var lower = text.ToLower();
+  var wanted = "@" + name.Trim().ToLower();
+  var from = 0;
+  while (from <= lower.Length - wanted.Length) {
+    var i = lower.IndexOf(wanted, from);
+    if (i < 0) { return false; }
+    var startsWord = i == 0 || char.IsWhiteSpace(lower[i - 1]) || lower[i - 1] == '(';
+    var end = i + wanted.Length;
+    var endsWord = end == lower.Length || !(char.IsLetterOrDigit(lower[end]) || lower[end] == '-');
+    if (startsWord && endsWord) { return true; }
+    from = i + 1;
+  }
+  return false;
+}

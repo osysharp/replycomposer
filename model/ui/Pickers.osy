@@ -1,0 +1,146 @@
+// THE PICKERS — saved replies and macros, opened from the composer's bar. A search box with the cursor in it, and the
+// list under it filtered as you type: Enter takes the first, Escape closes. Each row says what it is before you take
+// it — its title, its category, whose it is, and the start of its words — because a saved reply sent unread is how a
+// customer gets an answer to somebody else's question.
+namespace Osysharp.ReplyComposer;
+
+using Osysharp.Ui;
+
+/// The words a row shows of a reply: its first line that says something, short — without its markdown marks.
+public string FirstWords(string body) {
+  foreach (var line in body.Replace("\r", "").Replace("**", "").Replace("`", "").Split("\n")) {
+    var t = line.Trim();
+    if (t != "" && !t.EndsWith(",")) { return t.Length > 90 ? t.Substring(0, 90) + "…" : t; }
+  }
+  var all = body.Replace("\n", " ").Trim();
+  return all.Length > 90 ? all.Substring(0, 90) + "…" : all;
+}
+
+/// `query` matches a reply or macro by its title, its category or its words — every word of the query, any order.
+public bool Matches(string query, string title, string category, string body) {
+  var hay = (title + " " + category + " " + body).ToLower();
+  foreach (var w in query.ToLower().Split(" ")) {
+    if (w.Trim() != "" && !hay.Contains(w.Trim())) { return false; }
+  }
+  return true;
+}
+
+/// The saved replies for `kind`, searchable. `onPick` gets the chosen reply's id.
+[Composable]
+public component SavedReplyPicker(string kind, Action<Guid> onPick, Action onClose, string manageAt = "") {
+  live var replies = SavedReply.Where(r => r.Kind == kind).OrderBy(r => r.Category).ThenBy(r => r.Title).ToList();
+  live var me = Session.CurrentUser;
+  string query = "";
+
+  action TakeFirst() {
+    var first = replies.FirstOrDefault(r => Matches(query, r.Title, r.Category, r.Body));
+    if (first != null) { onPick(first.Id); }
+  }
+
+  render {
+    ComposerPopover("Saved replies") {
+      Input(value: query, label: "Search saved replies", placeholder: "Search saved replies…", autoFocus: true,
+            onEnter: TakeFirst, onEscape: onClose, w: "100%", h: Length.ControlSm, px: 2, rounded: Radius.Md, borderW: 1,
+            border: Colors.Border, bg: Colors.Bg, fontSize: FontSize.Label);
+      Stack(gap: 0, maxH: "320px", overflowY: Overflow.Auto, mt: 1, role: UiRole.List, label: "Replies") {
+        if (replies.Count == 0) {
+          PickerEmpty("No saved replies yet",
+                      manageAt != "" ? "Write the ones you send often in Settings › Saved replies." : "", manageAt);
+        } else if (!replies.Any(r => Matches(query, r.Title, r.Category, r.Body))) {
+          PickerEmpty("Nothing matches “" + query + "”", "Search by title, category or words.", "");
+        }
+        foreach (var r in replies.Where(r => Matches(query, r.Title, r.Category, r.Body))) {
+          PickerRow(r.Title, (r.Category != "" ? r.Category + " · " : "") + (r.Owner == null ? "the team's" : "yours"),
+                    FirstWords(r.Body), () => onPick(r.Id));
+        }
+      }
+    }
+  }
+}
+
+/// The macros for `kind`, searchable. Each row says what it does — its reply and its steps — before it is applied.
+[Composable]
+public component MacroPicker(string kind, Action<Guid> onPick, Action onClose, string manageAt = "") {
+  live var macros = Macro.Where(m => m.Kind == kind).OrderBy(m => m.Category).ThenBy(m => m.Title).ToList();
+  live var steps = MacroStep.Where(s => s.Macro.Kind == kind).OrderBy(s => s.Position).ToList();
+  string query = "";
+
+  action TakeFirst() {
+    var first = macros.FirstOrDefault(m => Matches(query, m.Title, m.Category, m.Body));
+    if (first != null) { onPick(first.Id); }
+  }
+
+  string Does(Macro m) {
+    var mine = steps.Where(s => s.Macro.Id == m.Id).Select(s => s.Label).ToList();
+    var words = m.Body.Trim() == "" ? "" : (m.AsNote ? "Writes a note" : "Writes a reply");
+    if (mine.Count == 0) { return words; }
+    return (words != "" ? words + " · " : "") + string.Join(" · ", mine);
+  }
+
+  render {
+    ComposerPopover("Macros") {
+      Input(value: query, label: "Search macros", placeholder: "Search macros…", autoFocus: true, onEnter: TakeFirst,
+            onEscape: onClose, w: "100%", h: Length.ControlSm, px: 2, rounded: Radius.Md, borderW: 1, border: Colors.Border,
+            bg: Colors.Bg, fontSize: FontSize.Label);
+      Stack(gap: 0, maxH: "320px", overflowY: Overflow.Auto, mt: 1, role: UiRole.List, label: "Macros list") {
+        if (macros.Count == 0) {
+          PickerEmpty("No macros yet",
+                      manageAt != "" ? "A macro writes a reply and sets things in one move — make one in Settings › Macros." : "",
+                      manageAt);
+        } else if (!macros.Any(m => Matches(query, m.Title, m.Category, m.Body))) {
+          PickerEmpty("Nothing matches “" + query + "”", "Search by title, category or words.", "");
+        }
+        foreach (var m in macros.Where(m => Matches(query, m.Title, m.Category, m.Body))) {
+          PickerRow(m.Title, (m.Category != "" ? m.Category + " · " : "") + (m.Owner == null ? "the team's" : "yours"),
+                    Does(m), () => onPick(m.Id));
+        }
+      }
+    }
+  }
+}
+
+/// The surface a picker floats on — grown from the bar, above the box (the composer sits at the foot of its pane).
+[Composable]
+component ComposerPopover(string label) {
+  render {
+    Stack(gap: 0, position: Position.Absolute, bottom: "100%", left: "0", mb: 2, z: ZIndex.Popover, p: 2,
+          w: "min(440px, calc(100vw - 32px))", bg: Colors.Elevated, color: Colors.OnSurface, rounded: Radius.Lg,
+          shadow: Shadow.Floating, transformOrigin: "bottom left", animation: KitMenuGrow, role: UiRole.Dialog, label: label) {
+      Slot;
+    }
+  }
+}
+
+/// One reply or macro in a picker.
+[Composable]
+component PickerRow(string title, string meta, string words, Action onPress) {
+  render {
+    Pressable(onClick: onPress, label: title, role: UiRole.ListItem, w: "100%", px: 2, py: 2, rounded: Radius.Md,
+              textAlign: TextAlign.Left, transition: Motion.Fast) {
+      Stack(gap: 0, minW: "0", w: "100%") {
+        Row(gap: 2, align: Align.Baseline, minW: "0") {
+          Text(title, fontSize: FontSize.Label, fontWeight: FontWeight.Medium, whiteSpace: WhiteSpace.Nowrap,
+               overflow: Overflow.Hidden, textOverflow: TextOverflow.Ellipsis, minW: "0");
+          Spacer();
+          Text(meta, fontSize: FontSize.Caption, color: Colors.TextMuted, whiteSpace: WhiteSpace.Nowrap);
+        }
+        if (words != "") {
+          Text(words, fontSize: FontSize.Caption, color: Colors.TextSecondary, whiteSpace: WhiteSpace.Nowrap,
+               overflow: Overflow.Hidden, textOverflow: TextOverflow.Ellipsis, minW: "0");
+        }
+      }
+    }
+  }
+}
+
+/// A picker with nothing to show — and, when there is somewhere to make some, the way there.
+[Composable]
+component PickerEmpty(string title, string body, string href) {
+  render {
+    Stack(gap: 1, px: 2, py: 3) {
+      Text(title, fontSize: FontSize.Label, fontWeight: FontWeight.Medium);
+      if (body != "") { Text(body, fontSize: FontSize.Caption, color: Colors.TextMuted); }
+      if (href != "") { Link(href: href, color: Colors.Primary, fontSize: FontSize.Caption) { Text("Open settings"); } }
+    }
+  }
+}

@@ -1,0 +1,36 @@
+// The desk every test starts from: Ada leads it (she keeps the team's replies), Raj works it, Tom is a tenant; three
+// requests — one from a tenant who gave a flat, one who did not, one with no name at all.
+using Osysharp.Identity;
+using Osysharp.ReplyComposer;
+using Osysharp.Storage;
+using ComposerKitTests;
+
+[TestFixture]
+void Building() {
+  var ada = new Person { Email = "ada@desk.test", DisplayName = "Ada Lindqvist", CodeHash = Security.HashPassword("1111"),
+                         Signature = "Ada Lindqvist\nFacilities, Kestrel House" };
+  new RoleGrant { Member = ada, Role = DeskRole.Lead };
+  var raj = new Person { Email = "raj@desk.test", DisplayName = "Raj Mehta", CodeHash = Security.HashPassword("2222") };
+  new RoleGrant { Member = raj, Role = DeskRole.Staff };
+  var tom = new Person { Email = "tom@tenant.test", DisplayName = "Tom Berg", CodeHash = Security.HashPassword("3333") };
+  new RoleGrant { Member = tom, Role = DeskRole.Tenant };
+  new Request { Number = 101, Title = "Radiator cold in the bedroom", TenantName = "Hanna Svensson", Unit = "4B" };
+  new Request { Number = 102, Title = "Lift stuck on the third floor", TenantName = "Omar Haddad" };
+  new Request { Number = 103, Title = "Water under the sink", TenantName = "" };
+}
+
+principal Ada => Person.Single(p => p.Email == "ada@desk.test");
+principal Raj => Person.Single(p => p.Email == "raj@desk.test");
+principal Tom => Person.Single(p => p.Email == "tom@tenant.test");
+
+Guid RequestId(int number) {
+  Guid id = Guid.Empty;
+  runas (Ada) { id = Request.Single(r => r.Number == number).Id; }
+  return id;
+}
+
+/// A private upload by the caller, as the platform stores one, and the UploadedFile the page hands over for it.
+UploadedFile Uploaded(string name, byte[] bytes, string type = "") {
+  var path = File.SaveUpload(name, bytes);
+  return new UploadedFile { Path = path, FileName = name, ContentType = type, Length = bytes.Length };
+}

@@ -1,0 +1,157 @@
+namespace ComposerKitTests;
+
+using Osysharp.Identity;
+using Osysharp.ReplyComposer;
+using Osysharp.Storage;
+
+// A BUILDING'S MAINTENANCE DESK — the record a composer answers is a `Request`, and a reply is the app's own
+// `RequestReply` row. Everything the kit knows about either it learns from `RequestReplies` below.
+
+[Role] enum DeskRole { Authenticator, Staff, Lead, Tenant }
+
+policy IsStaff => RoleGrant.Any(g => g.Member == user && (g.Role == DeskRole.Staff || g.Role == DeskRole.Lead));
+policy IsLead => RoleGrant.Any(g => g.Member == user && g.Role == DeskRole.Lead);
+/// The kit's two questions: staff write here; leads keep the team's replies and macros.
+policy ComposesReplies => IsStaff;
+policy ManagesSavedReplies => IsLead;
+
+/// A person — staff or tenant — signing in with a code, which is all a test needs.
+entity Person : Principal {
+  [MaxLength(200)] string CodeHash = "";
+  /// Put under every reply they send.
+  [MaxLength(300)] string Signature = "";
+  security {
+    allow read when IsAuthenticated || IsAuthenticator;
+    allow create when IsAuthenticator;
+    allow update when IsAuthenticated where Id == user.Id;
+    deny read CodeHash when !IsAuthenticator;
+  }
+}
+
+// ⚠ Appended, never inserted: an enum is stored by position.
+enum RequestStatus { [Label("Open")] Open, [Label("Waiting on the tenant")] Waiting, [Label("Done")] Done }
+
+/// Something broken in the building.
+entity Request {
+  int Number;
+  [Required, MaxLength(120)] string Title;
+  [MaxLength(80)] string TenantName = "";
+  /// The flat — empty when the tenant did not say.
+  [MaxLength(20)] string Unit = "";
+  RequestStatus Status = RequestStatus.Open;
+  [MaxLength(200)] string Labels = "";
+  security { allow read, create, update when IsStaff; }
+}
+
+/// A reply on a request — or a note only staff read.
+entity RequestReply {
+  [Required] Request Request;
+  [MaxLength(50000)] string Text = "";
+  bool Note;
+  [MaxLength(80)] string By = "";
+  DateTime At;
+  int Files;
+  /// Who a note named — their addresses, as the composer handed them over.
+  [MaxLength(500)] string Mentioned = "";
+  security { allow read, create when IsStaff; }
+}
+
+app.Composer = new ComposerSetup { Targets = [new ComposerKitTests.RequestReplies()], MaxFileBytes = 2000000 };
+
+/// What sending means on this desk: a `RequestReply` row, and "send and set" moves the request's status.
+public class RequestReplies : ComposerTarget {
+  /// A macro's steps are the desk's own actions on a request.
+  public override string Record { get { return typeof(Request).FullName; } }
+  public override string Send(ComposerSend s) {
+    var r = Request.Single(x => x.Id == s.Item);
+    // A reply over one that arrived while the writer wrote is refused, naming it — what `seen` is for.
+    if (!s.Note && s.Seen >= 0 && RequestReply.Count(x => x.Request == r && !x.Note) > s.Seen) {
+      throw new ValidationException("Somebody replied while you were writing. Read it; yours is still here.");
+    }
+    new RequestReply { Request = r, Text = s.Text, Note = s.Note, By = Session.CurrentUser!.DisplayName, At = DateTime.UtcNow,
+                       Files = s.Files.Count, Mentioned = string.Join(" ", s.Mentions) };
+    if (s.After != "") { r.Status = RequestStatus.Members.Single(m => m.ToString() == s.After); }
+    UnitOfWork.Commit();
+    return s.After != "" ? "Sent, and set to " + r.Status.Label + "." : "";
+  }
+  public override List<ComposerAfter> After(Guid item) {
+    return [new ComposerAfter { Key = "Waiting", Label = "Waiting on the tenant" }, new ComposerAfter { Key = "Done", Label = "Done" }];
+  }
+  public override List<ReplyPlaceholder> Placeholders() {
+    return [
+      new TenantFirstName { Key = "tenant.first_name", Label = "Tenant's first name", Fallback = "there" },
+      new RequestNumber { Key = "request.number", Label = "Request number" },
+      new RequestUnit { Key = "request.unit", Label = "Flat" },
+      new MyFirstName { Key = "me.first_name", Label = "Your first name" },
+    ];
+  }
+  public override string Signature() {
+    var me = Person.FirstOrDefault(p => p.Id == Session.CurrentUser!.Id);
+    return me == null ? "" : me.Signature;
+  }
+  /// A note names the building's staff; a tenant may not be named — notes are for staff.
+  public override List<MentionChoice> Mentionable(Guid item) {
+    List<MentionChoice> people = [];
+    foreach (var p in Person.OrderBy(x => x.DisplayName).ToList()) {
+      // The desk's staff sign in with its own domain; tenants with theirs.
+      var staff = p.Email.EndsWith("@desk.test");
+      people.Add(new MentionChoice { Key = p.Email, Name = p.DisplayName, Hint = staff ? "Staff" : "Tenant",
+                                     Refusal = staff ? "" : p.DisplayName + " is a tenant — a note is for staff only." });
+    }
+    return people;
+  }
+}
+
+public class TenantFirstName : ReplyPlaceholder {
+  public override string Fill(Guid item) {
+    var name = Request.Single(r => r.Id == item).TenantName.Trim();
+    return name.Contains(" ") ? name.Substring(0, name.IndexOf(" ")) : name;
+  }
+}
+public class RequestNumber : ReplyPlaceholder {
+  public override string Fill(Guid item) { return "#" + Request.Single(r => r.Id == item).Number; }
+}
+public class RequestUnit : ReplyPlaceholder {
+  public override string Fill(Guid item) { return Request.Single(r => r.Id == item).Unit; }
+}
+public class MyFirstName : ReplyPlaceholder {
+  public override string Fill(Guid item) {
+    var name = (Session.CurrentUser!.DisplayName ?? "").Trim();
+    return name.Contains(" ") ? name.Substring(0, name.IndexOf(" ")) : name;
+  }
+}
+
+/// What the desk does to a request — its own actions, which a macro's steps are.
+[Action("Set status")]
+public string SetRequestStatus(Request r, RequestStatus status) {
+  r.Status = status;
+  UnitOfWork.Commit();
+  return "Status set to " + status.Label + ".";
+}
+
+/// Label the request — the labels in use are the choices.
+[Action("Add a label")]
+public string LabelRequest(Request r, [Label("Label")] [Choices(LabelChoices)] string label) {
+  if (!(" " + r.Labels + " ").Contains(" " + label + " ")) { r.Labels = (r.Labels + " " + label).Trim(); }
+  UnitOfWork.Commit();
+  return "Labelled " + label + ".";
+}
+
+/// The labels this desk uses.
+List<string> Labels() => ["heating", "plumbing", "lift", "keys"];
+
+public List<ActionChoice> LabelChoices() {
+  return Labels().Select(l => new ActionChoice { Key = l, Label = l }).ToList();
+}
+
+[AuthMethod]
+string SignInWithCode(string email, string code) {
+  var p = Person.FirstOrDefault(x => x.Email == NormalisedEmail(email));
+  if (p == null || !p.IsActive) { Security.VerifyPassword(code); return ""; }
+  if (!Security.VerifyPassword(code, p.CodeHash)) { return ""; }
+  return Security.IssueJwt(p.Id, p.Email);
+}
+
+app.AuthBootstrap = new AuthBootstrap { Role = DeskRole.Authenticator, Login = SignInWithCode };
+app.Auth = new PasswordAuth { LoginField = Email, PasswordField = CodeHash };
+app.Audit = new AuditConfig { Redact = new AuditRedaction { Properties = [ComposerKitTests.Person.CodeHash] } };

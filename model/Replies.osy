@@ -1,0 +1,209 @@
+namespace Osysharp.ReplyComposer;
+
+using Osysharp.Identity;
+
+// SAVED REPLIES AND THEIR PLACEHOLDERS — a reply written once and sent often, with `{{key}}` where the record's own
+// values go. A key is one the app DECLARED (`ComposerTarget.Placeholders`), so a reply naming anything else is refused
+// when it is saved; filling happens on the server, as the writer, when the reply is inserted.
+
+/// A reply the team writes once and sends often — the team's, or one writer's own.
+public entity SavedReply {
+  /// The kind of record it is for — matches the target's `Kind`. "" in an app with one composer.
+  [MaxLength(40)] string Kind = "";
+  [Required("Name the reply — it is what you search for."), MaxLength(80)] string Title;
+  [Required("Write the reply."), MaxLength(4000)] string Body;
+  [MaxLength(40)] string Category = "";
+  /// One writer's own; none: the team's.
+  Principal? Owner;
+  security {
+    allow read when ComposesReplies where Owner == null || Owner == user;
+    allow create, update, delete when ComposesReplies where Owner == user;
+    allow create, update, delete when ComposesReplies && ManagesSavedReplies;
+  }
+}
+
+/// A saved reply or macro was used — one row per use, written by the writer, so a shared reply is never written to by
+/// everyone who sends it. What "used 12×" counts.
+public entity ComposerUse {
+  /// The `SavedReply` or `Macro` used.
+  Guid What;
+  bool Macro;
+  [Required] Principal By;
+  DateTime At;
+  security {
+    allow read when ComposesReplies;
+    allow create when ComposesReplies where By == user;
+  }
+}
+
+/// A placeholder as the writer's menus show it.
+public class PlaceholderInfo {
+  public string Key = "";
+  public string Label = "";
+  public string Fallback = "";
+}
+
+/// A reply's text with its placeholders filled.
+public class FilledText {
+  public string Text = "";
+  /// The placeholders the record could not fill and that have no stand-in — left in the text.
+  public List<PlaceholderInfo> Unfilled = [];
+}
+
+// ── placeholders ───────────────────────────────────────────────────────────────────────────────────────────────────
+
+/// The placeholders a reply for `kind` may use.
+public List<PlaceholderInfo> PlaceholdersFor(string kind) {
+  List<PlaceholderInfo> all = [];
+  foreach (var p in TargetFor(kind).Placeholders()) {
+    all.Add(new PlaceholderInfo { Key = p.Key, Label = p.Label, Fallback = p.Fallback });
+  }
+  return all;
+}
+
+/// The keys written in `text`, in order, each once — every `{{…}}` with its spaces trimmed.
+public List<string> KeysIn(string text) {
+  List<string> keys = [];
+  var at = text.IndexOf("{{");
+  while (at >= 0) {
+    var close = text.IndexOf("}}", at + 2);
+    if (close < 0) { break; }
+    var key = text.Substring(at + 2, close - at - 2).Trim();
+    if (!keys.Contains(key)) { keys.Add(key); }
+    at = text.IndexOf("{{", close + 2);
+  }
+  return keys;
+}
+
+/// What is wrong with the placeholders in `text`, as one sentence — "" when nothing is. An opening `{{` with no closing
+/// `}}`, or a key the app did not declare (naming every key it did).
+public string PlaceholderProblem(string kind, string text) {
+  var declared = TargetFor(kind).Placeholders();
+  var opened = text.IndexOf("{{");
+  while (opened >= 0) {
+    var close = text.IndexOf("}}", opened + 2);
+    var next = text.IndexOf("{{", opened + 2);
+    if (close < 0 || (next >= 0 && next < close)) {
+      return "A placeholder opens with {{ and is never closed with }} — finish it, or take the {{ out.";
+    }
+    opened = text.IndexOf("{{", close + 2);
+  }
+  List<string> unknown = [];
+  foreach (var key in KeysIn(text)) {
+    if (!declared.Any(p => p.Key == key)) { unknown.Add("{{" + key + "}}"); }
+  }
+  if (unknown.Count == 0) { return ""; }
+  var known = declared.Count == 0 ? "This desk declares no placeholders."
+    : "The placeholders are: " + string.Join(", ", declared.Select(p => "{{" + p.Key + "}} (" + p.Label + ")")) + ".";
+  return (unknown.Count == 1 ? unknown[0] + " is not a placeholder." : string.Join(", ", unknown) + " are not placeholders.")
+    + " " + known;
+}
+
+/// `text` with every declared placeholder filled from record `item`, as the writer — or its stand-in; one with
+/// neither stays as written, and is listed in `Unfilled`. A `{{…}}` that names no declared key is left alone: a reply
+/// may be ABOUT templates (a developer's Handlebars), and only the app's own keys are the kit's to fill.
+public FilledText Fill(string kind, string text, Guid item) {
+  var result = new FilledText { Text = text };
+  var declared = TargetFor(kind).Placeholders();
+  foreach (var key in KeysIn(text)) {
+    var p = declared.FirstOrDefault(x => x.Key == key);
+    if (p == null) { continue; }
+    var value = p.Fill(item).Trim();
+    if (value == "") { value = p.Fallback; }
+    if (value == "") { result.Unfilled.Add(new PlaceholderInfo { Key = p.Key, Label = p.Label }); continue; }
+    result.Text = ReplaceKey(result.Text, key, value);
+  }
+  return result;
+}
+
+/// Every `{{ key }}` (any inner spacing) in `text` replaced by `value`.
+string ReplaceKey(string text, string key, string value) {
+  var result = "";
+  var rest = text;
+  var at = rest.IndexOf("{{");
+  while (at >= 0) {
+    var close = rest.IndexOf("}}", at + 2);
+    if (close < 0) { break; }
+    var inner = rest.Substring(at + 2, close - at - 2).Trim();
+    result = result + rest.Substring(0, at) + (inner == key ? value : rest.Substring(at, close + 2 - at));
+    rest = rest.Substring(close + 2);
+    at = rest.IndexOf("{{");
+  }
+  return result + rest;
+}
+
+/// The declared placeholders still in `text` (nothing filled them), by label — what refuses a send.
+public List<PlaceholderInfo> LeftIn(string kind, string text) {
+  List<PlaceholderInfo> left = [];
+  var keys = KeysIn(text);
+  foreach (var p in TargetFor(kind).Placeholders()) {
+    if (keys.Contains(p.Key)) { left.Add(new PlaceholderInfo { Key = p.Key, Label = p.Label }); }
+  }
+  return left;
+}
+
+// ── using one ──────────────────────────────────────────────────────────────────────────────────────────────────────
+
+/// Saved reply `replyId`, filled from record `item` for the writer to insert. Counts as a use.
+public FilledText InsertSavedReply(Guid replyId, Guid item) {
+  var r = SavedReply.FirstOrDefault(x => x.Id == replyId);
+  if (r == null) { throw new ValidationException("That saved reply is gone — somebody removed it."); }
+  var filled = Fill(r.Kind, r.Body, item);
+  new ComposerUse { What = r.Id, Macro = false, By = Session.CurrentUser!, At = DateTime.UtcNow };
+  UnitOfWork.Commit();
+  return filled;
+}
+
+/// One reply's (or macro's) count of uses, from the grouped read.
+public class UseCount {
+  public Guid What;
+  public int Count;
+}
+
+/// How often each saved reply or macro of `kind` has been used — one grouped read, for the settings lists. The database
+/// counts: a row per id, however many times each has been used.
+public Dictionary<Guid, int> UsesOf(List<Guid> ids) {
+  var counts = new Dictionary<Guid, int>();
+  if (ids.Count == 0) { return counts; }
+  foreach (var u in ComposerUse.Where(x => ids.Contains(x.What)).GroupBy(x => new() { What = x.What })
+      .Select(g => new UseCount { What = g.Key.What, Count = g.Count() }).ToList()) {
+    counts[u.What] = u.Count;
+  }
+  return counts;
+}
+
+/// Whether the caller keeps the TEAM's replies and macros (the app's `ManagesSavedReplies`) — asked of the server,
+/// which is where the answer is decided.
+public bool KeepsTeamReplies() { return ManagesSavedReplies; }
+
+// ── keeping them ───────────────────────────────────────────────────────────────────────────────────────────────────
+
+/// Save a reply — a new one when `id` is null. `shared`: the team's (who may write those is the app's
+/// `ManagesSavedReplies`); otherwise the writer's own. Refused, by sentence, when its placeholders are not right.
+public Guid SaveSavedReply(Guid? id, string kind, string title, string body, string category, bool shared) {
+  if (title.Trim() == "") { throw new ValidationException("Name the reply — it is what you search for."); }
+  if (body.Trim() == "") { throw new ValidationException("Write the reply."); }
+  var problem = PlaceholderProblem(kind, body);
+  if (problem != "") { throw new ValidationException(problem); }
+  var me = Session.CurrentUser!;
+  SavedReply r;
+  if (id == null) { r = new SavedReply { Kind = kind, Title = title.Trim(), Body = body }; }
+  else {
+    var found = SavedReply.FirstOrDefault(x => x.Id == id);
+    if (found == null) { throw new ValidationException("That saved reply is gone — somebody removed it."); }
+    r = found!;
+  }
+  r.Title = title.Trim();
+  r.Body = body;
+  r.Category = category.Trim();
+  r.Owner = shared ? null : me;
+  UnitOfWork.Commit();
+  return r.Id;
+}
+
+public void RemoveSavedReply(Guid id) {
+  var r = SavedReply.FirstOrDefault(x => x.Id == id);
+  if (r == null) { return; }
+  r.Delete();
+  UnitOfWork.Commit();
+}

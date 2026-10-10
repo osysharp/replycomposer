@@ -1,0 +1,219 @@
+namespace Osysharp.ReplyComposer;
+
+using Osysharp.Identity;
+
+// MACROS — a reply and a few of the app's own actions, applied in one move: "Refund on its way" writes the reply, tags
+// the record `refund` and sets it Pending. The steps are the APP's `[Action]`s on the record (`ComposerTarget.Record`)
+// — the same functions its automations run — run as the writer, so a macro does exactly what the writer could do by
+// hand and nothing else.
+//
+// ⚑ APPLYING STAGES, SENDING RUNS. Applying a macro puts its reply in the composer and lists its steps ("When you
+//   send: Set status → Pending"); the steps run with the send, after it, in order — so the writer reads and edits the
+//   reply first, takes off a step they do not want, or discards the lot. A macro with no reply runs when the writer
+//   presses Apply.
+//
+// ⚑ A STEP WHOSE CHOICE HAS GONE IS SAID, NEVER SKIPPED. A step keeps the label it was chosen with, so a macro naming
+//   a status since deleted says "Set status: Waiting on vendor — that choice no longer exists" when applied.
+
+/// A reply and the steps that go with it — the team's, or one writer's own.
+public entity Macro {
+  [MaxLength(40)] string Kind = "";
+  [Required("Name the macro — it is what you search for."), MaxLength(80)] string Title;
+  [MaxLength(40)] string Category = "";
+  /// The reply it writes, placeholders and all — "" for a macro that only sets things.
+  [MaxLength(4000)] string Body = "";
+  /// Write it as an internal note rather than a reply.
+  bool AsNote = false;
+  /// One writer's own; none: the team's.
+  Principal? Owner;
+  security {
+    allow read when ComposesReplies where Owner == null || Owner == user;
+    allow create, update, delete when ComposesReplies where Owner == user;
+    allow create, update, delete when ComposesReplies && ManagesSavedReplies;
+  }
+}
+
+/// One step of a macro: one of the app's `[Action]`s, and the value it was set to.
+public entity MacroStep {
+  [Required] Macro Macro;
+  int Position = 0;
+  /// The action's name (`ActionInfo.Name`).
+  [Required, MaxLength(200)] string Action;
+  /// The parameter the value is for — "" for an action that takes nothing but the record.
+  [MaxLength(80)] string Parameter = "";
+  [MaxLength(200)] string Choice = "";
+  /// "Set status: Pending" — as it read when chosen, so a step whose choice has gone can still say what it was.
+  [MaxLength(200)] string Label = "";
+  security {
+    allow read when ComposesReplies where Macro.Owner == null || Macro.Owner == user;
+    allow create, update, delete when ComposesReplies where Macro.Owner == user;
+    allow create, update, delete when ComposesReplies && ManagesSavedReplies;
+  }
+}
+
+/// A step waiting to run with the next send — on a draft, or as a macro is edited.
+public class StagedStep {
+  public string Action = "";
+  public string Parameter = "";
+  public string Choice = "";
+  /// "Set status: Pending".
+  public string Label = "";
+}
+
+/// An action as the macro editor offers it — what it is called, and the choices for its one parameter.
+public class MacroAction {
+  /// The action's name.
+  public string Name = "";
+  /// "Set status" — a step reads "Set status: Pending".
+  public string Label = "";
+  /// The parameter a choice is made for — "" for an action that takes nothing but the record.
+  public string Parameter = "";
+  public List<ActionChoice> Choices = [];
+}
+
+/// What applying a macro puts in the composer.
+public class AppliedMacro {
+  public string Title = "";
+  public string Text = "";
+  public bool Note;
+  public List<StagedStep> Steps = [];
+  /// The placeholders the record could not fill — left in the text.
+  public List<PlaceholderInfo> Unfilled = [];
+  /// A sentence per step that cannot run as written (its action or its choice has gone). Those steps are not staged.
+  public List<string> Problems = [];
+}
+
+/// The actions a macro for `kind` may run, with their choices as they are now, for the writer: the app's `[Action]`s
+/// on the record this composer writes on, that it offers — each taking at most one choice beside the record.
+public List<MacroAction> ActionsFor(string kind) {
+  var target = TargetFor(kind);
+  List<MacroAction> all = [];
+  if (target.Record == "") { return all; }
+  foreach (var a in Actions.Catalog().Where(x => x.Subject == target.Record && target.Offers(x))) {
+    var rest = a.Parameters.Where(p => !p.Subject).ToList();
+    if (rest.Count > 1) { continue; }
+    if (rest.Count == 0) { all.Add(new MacroAction { Name = a.Name, Label = a.Label }); continue; }
+    var p = rest[0];
+    List<ActionChoice> choices = p.ChoicesFromData ? Actions.Choices(a.Name, p.Name) : p.Choices;
+    if (p.Kind == ActionParameterKind.YesNo) {
+      choices = [new ActionChoice { Key = "true", Label = "Yes" }, new ActionChoice { Key = "false", Label = "No" }];
+    }
+    // A step is chosen from a menu — an action whose value is free text is the automations' to run, not a macro's.
+    if (choices.Count == 0) { continue; }
+    all.Add(new MacroAction { Name = a.Name, Label = a.Label, Parameter = p.Name, Choices = choices });
+  }
+  return all;
+}
+
+/// "Set status: Pending" — or the action's label alone when it takes no choice.
+public string StepLabel(MacroAction action, string choice) {
+  var c = action.Choices.FirstOrDefault(x => x.Key == choice);
+  if (c == null) { return action.Label; }
+  return action.Label + ": " + c.Label;
+}
+
+/// Why a step cannot run as written on `kind` — "" when it can.
+public string StepProblem(string kind, string actionName, string choice, string label) {
+  var action = ActionsFor(kind).FirstOrDefault(a => a.Name == actionName);
+  if (action == null) { return $"\"{label}\" cannot run — this desk no longer has that action."; }
+  if (action.Parameter != "" && !action.Choices.Any(c => c.Key == choice)) {
+    return $"\"{label}\" cannot run — that choice no longer exists. Edit the macro to choose again.";
+  }
+  return "";
+}
+
+/// Macro `macroId`, applied to record `item`: its reply filled, its runnable steps staged, and a sentence for each that
+/// cannot run. Counts as a use.
+[SuppressWarning("cost-unbounded-read")]   // one macro's steps
+public AppliedMacro ApplyMacro(Guid macroId, Guid item) {
+  var m = Macro.FirstOrDefault(x => x.Id == macroId);
+  if (m == null) { throw new ValidationException("That macro is gone — somebody removed it."); }
+  var filled = Fill(m.Kind, m.Body, item);
+  var applied = new AppliedMacro { Title = m.Title, Text = filled.Text, Note = m.AsNote, Unfilled = filled.Unfilled };
+  foreach (var s in MacroStep.Where(x => x.Macro.Id == m.Id).OrderBy(x => x.Position).ToList()) {
+    var problem = StepProblem(m.Kind, s.Action, s.Choice, s.Label);
+    if (problem != "") { applied.Problems.Add(problem); continue; }
+    applied.Steps.Add(new StagedStep { Action = s.Action, Parameter = s.Parameter, Choice = s.Choice, Label = s.Label });
+  }
+  new ComposerUse { What = m.Id, Macro = true, By = Session.CurrentUser!, At = DateTime.UtcNow };
+  UnitOfWork.Commit();
+  return applied;
+}
+
+/// Run `steps` on record `item`, in order, as the writer — what a send does after sending. Each is the app's own
+/// `[Action]`, run under the writer's own rules. Answers what each did; the first that is refused stops the rest, and
+/// its sentence is the exception's.
+public List<string> RunSteps(string kind, Guid item, List<StagedStep> steps) {
+  List<string> done = [];
+  foreach (var s in steps) {
+    var problem = StepProblem(kind, s.Action, s.Choice, s.Label);
+    if (problem != "") { throw new ValidationException(problem); }
+    var info = Actions.Find(s.Action)!;
+    var subject = info.Parameters.First(p => p.Subject);
+    List<ActionValue> values = [new ActionValue { Parameter = subject.Name, Value = item.ToString() }];
+    if (s.Parameter != "") { values.Add(new ActionValue { Parameter = s.Parameter, Value = s.Choice }); }
+    var result = Actions.Run(s.Action, values);
+    if (result.Outcome != ActionOutcome.Done) { throw new ValidationException($"\"{s.Label}\" was not done: {result.Problem}"); }
+    done.Add(result.Said != "" ? result.Said : s.Label + ".");
+  }
+  return done;
+}
+
+/// Save a macro — a new one when `id` is null — with its steps in order. Refused, by sentence, when its placeholders
+/// are not right, when it does nothing at all, or when a step names an action or a choice that does not exist.
+[SuppressWarning("cost-unbounded-read")]   // one macro's steps
+public Guid SaveMacro(Guid? id, string kind, string title, string category, string body, bool asNote, bool shared,
+                      List<StagedStep> steps) {
+  if (title.Trim() == "") { throw new ValidationException("Name the macro — it is what you search for."); }
+  if (body.Trim() == "" && steps.Count == 0) {
+    throw new ValidationException("A macro writes a reply, sets something, or both — give it at least one.");
+  }
+  var problem = PlaceholderProblem(kind, body);
+  if (problem != "") { throw new ValidationException(problem); }
+  var actions = ActionsFor(kind);
+  foreach (var s in steps) {
+    var action = actions.FirstOrDefault(a => a.Name == s.Action);
+    if (action == null) { throw new ValidationException($"\"{s.Action}\" is not an action this desk offers."); }
+    if (action.Parameter != "" && !action.Choices.Any(c => c.Key == s.Choice)) {
+      throw new ValidationException($"Choose what \"{action.Label}\" sets.");
+    }
+  }
+  Macro m;
+  if (id == null) { m = new Macro { Kind = kind, Title = title.Trim() }; }
+  else {
+    var found = Macro.FirstOrDefault(x => x.Id == id);
+    if (found == null) { throw new ValidationException("That macro is gone — somebody removed it."); }
+    m = found!;
+    foreach (var old in MacroStep.Where(x => x.Macro.Id == m.Id).ToList()) { old.Delete(); }
+  }
+  m.Title = title.Trim();
+  m.Category = category.Trim();
+  m.Body = body;
+  m.AsNote = asNote;
+  m.Owner = shared ? null : Session.CurrentUser!;
+  var position = 0;
+  foreach (var s in steps) {
+    var action = actions.First(a => a.Name == s.Action);
+    new MacroStep { Macro = m, Position = position, Action = s.Action, Parameter = action.Parameter, Choice = s.Choice,
+                    Label = StepLabel(action, s.Choice) };
+    position = position + 1;
+  }
+  UnitOfWork.Commit();
+  return m.Id;
+}
+
+[SuppressWarning("cost-unbounded-read")]   // one macro's steps
+public void RemoveMacro(Guid id) {
+  var m = Macro.FirstOrDefault(x => x.Id == id);
+  if (m == null) { return; }
+  foreach (var s in MacroStep.Where(x => x.Macro.Id == id).ToList()) { s.Delete(); }
+  m.Delete();
+  UnitOfWork.Commit();
+}
+
+/// A macro's steps as the editor holds them.
+[SuppressWarning("cost-unbounded-read")]   // one macro's steps
+public List<StagedStep> StepsOf(Guid macroId) {
+  return MacroStep.Where(x => x.Macro.Id == macroId).OrderBy(x => x.Position).ToList()
+    .Select(s => new StagedStep { Action = s.Action, Parameter = s.Parameter, Choice = s.Choice, Label = s.Label }).ToList();
+}

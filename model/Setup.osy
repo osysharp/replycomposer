@@ -1,0 +1,194 @@
+namespace Osysharp.ReplyComposer;
+
+using Osysharp.Identity;
+using Osysharp.Storage;
+
+// THE CONTRACT — what the app says once, and everything the kit learns about a record from it.
+
+/// Who writes with a composer: reads the team's saved replies and macros, keeps their own, and keeps their drafts.
+/// `policy ComposesReplies => IsAgent;`
+policy ComposesReplies;
+
+/// Who writes the TEAM's saved replies and macros — everyone who composes may keep their own.
+/// `policy ManagesSavedReplies => IsAdmin;`
+policy ManagesSavedReplies;
+
+/// `app.Composer = new ComposerSetup { Targets = [new DeskReplies()] };`
+[AppSetting("Composer")]
+public class ComposerSetup {
+  /// What sending means for each kind of record a composer is pointed at — one per `Kind`. An app with one composer
+  /// has one, with the default `Kind` "".
+  public List<ComposerTarget> Targets = [];
+  /// The largest file a writer may add, in bytes. Over it they are told which file, how big, and the limit. An
+  /// organisation's policy may bound it for every app it runs.
+  [OrgPolicy(OrgPolicyMode.Range)] public long MaxFileBytes = 10485760;
+  /// How long a reply may be — a draft over it is refused when sent, with the count.
+  public int MaxLength = 20000;
+}
+
+/// What a composer does for one kind of record. Override `Send`; the rest are optional.
+///
+/// ⚑ EVERY METHOD RUNS ON THE SERVER, AS THE WRITER — what it reads and writes obeys the app's rules for them, so a
+///   placeholder fills only what the writer may read, and a macro step does only what the writer may do.
+public class ComposerTarget {
+  /// The kind of record, matching `Composer(kind:)`. "" for an app with one composer.
+  public string Kind = "";
+
+  /// Send it: the reply (or note) the writer wrote, on record `send.Item`. Answers a sentence for the writer, or ""
+  /// for "Sent." / "Note added.". Throw a `ValidationException` to refuse — its message is shown, and the draft is
+  /// kept. The kit has already filled the signature into `send.Text` (when the writer kept it) and checked that no
+  /// declared placeholder is left in it.
+  public virtual string Send(ComposerSend send) {
+    throw new ValidationException("Nothing is set up to send this — the app names a target for it in app.Composer.");
+  }
+
+  /// The "send and set…" choices for `item` — sending AND moving the record on in one act ("Send and set Pending").
+  /// `ComposerSend.After` carries the chosen `Key`. Empty: the composer offers only Send.
+  public virtual List<ComposerAfter> After(Guid item) { return []; }
+
+  /// The placeholders a saved reply or macro may use for this kind of record — each a class that fills itself.
+  public virtual List<ReplyPlaceholder> Placeholders() { return []; }
+
+  /// The record this composer writes on — `typeof(Ticket).FullName`. A macro's steps are the app's `[Action]`s whose
+  /// first parameter is one of these (the record the macro is applied to), with what each offers for the rest. ""
+  /// (the default): a macro only writes a reply.
+  public virtual string Record { get { return ""; } }
+
+  /// Whether a macro may run this action — every action on `Record` by default. Leave out what makes no sense
+  /// beside a reply (mailing the customer, say).
+  public virtual bool Offers(ActionInfo action) { return true; }
+
+  /// The writer's signature, put under every reply they send (never under a note). "" for none.
+  public virtual string Signature() { return ""; }
+
+  /// Keep a file the writer pasted, dropped or picked, as THEIRS until it is sent. The default stores it privately
+  /// and checks its size; an app whose sending checks more (what a file really is, from its bytes) overrides this to
+  /// check it now, while the writer can still do something about it.
+  public virtual ComposerFile Keep(UploadedFile upload) { return KeepPrivately(upload); }
+
+  /// The writer started or stopped writing on `item` — `doing` is "replying", "writing a note" or "viewing". For the
+  /// app to tell colleagues on the record (a presence seat). Never carries what was written.
+  public virtual void Writing(Guid item, string doing) { }
+
+  /// The people a NOTE on `item` may name — `@Ines Moreau` — offered as the writer types `@`, and found in the note
+  /// when it is sent (`ComposerSend.Mentions`). One that may not be named here carries why (`MentionChoice.Refusal`):
+  /// it is offered greyed with the reason, and a note naming it is refused with it. Empty (the default): a note names
+  /// nobody. Only a note — a reply goes to the person on the other side, who has no use for a colleague's name.
+  public virtual List<MentionChoice> Mentionable(Guid item) { return []; }
+}
+
+/// Somebody a note may name, and — when they may not be named on this record — why.
+public class MentionChoice {
+  /// What the app knows them by — handed back in `ComposerSend.Mentions` ("their account's id").
+  public string Key = "";
+  /// Their name as it is written after the `@` — "Ines Moreau".
+  public string Name = "";
+  /// A word under the name — their role, their team. "" for none.
+  public string Hint = "";
+  /// Why they may not be named here — "Ines cannot open this ticket: it waits in Billing, which she is not in." — or ""
+  /// when they may.
+  public string Refusal = "";
+}
+
+/// What the writer sent.
+public class ComposerSend {
+  public Guid Item;
+  /// The words, with the signature already under them (a reply the writer signed). Markdown.
+  public string Text = "";
+  /// An internal note — the record's team reads it, the person on the other side never does.
+  public bool Note;
+  /// The files going with it — each the writer's own (`ComposerTarget.Keep`).
+  public List<Guid> Files = [];
+  /// The "send and set…" choice (`ComposerAfter.Key`) — "" for a plain send.
+  public string After = "";
+  /// What the writer had on screen when they started: the `seen` the page handed the composer (`Composer(seen:)`) at
+  /// that moment, -1 when it handed none. For refusing a send over something that arrived while they wrote.
+  public long Seen = -1;
+  /// The people a note names (`@Ines Moreau`) — their `MentionChoice.Key`s, once each, in the order written. Every one
+  /// may be named here: a note naming somebody who may not is refused before it reaches `Send`. Always empty for a reply.
+  public List<string> Mentions = [];
+}
+
+/// One "send and set…" choice.
+public class ComposerAfter {
+  public string Key = "";
+  /// "Pending" — the menu says "Send and set Pending".
+  public string Label = "";
+}
+
+/// A file going with the next message — kept, not yet sent.
+public class ComposerFile {
+  public Guid Id;
+  public string Name = "";
+  public long Size;
+  /// A picture: shown as one in the composer's file list.
+  public bool Picture;
+}
+
+/// One placeholder a saved reply may use — `{{customer.first_name}}` — and how it fills itself from the record.
+///
+/// `class CustomerFirstName : ReplyPlaceholder { public override string Fill(Guid item) => … }`, listed by the
+/// target as `new CustomerFirstName { Key = "customer.first_name", Label = "Customer's first name", Fallback = "there" }`.
+public class ReplyPlaceholder {
+  /// What a reply writes between `{{` and `}}`: lower case, digits, `.` and `_`.
+  public string Key = "";
+  /// What the writer sees in the "Insert a placeholder" menu.
+  public string Label = "";
+  /// What the reply says when the record has no value ("there", for "Hi there"). "": nothing stands in — the
+  /// placeholder stays in the text, marked, and the reply cannot be sent until the writer replaces it.
+  public string Fallback = "";
+  /// The value for record `item`, read as the writer. "" for none.
+  public virtual string Fill(Guid item) { return ""; }
+}
+
+// ── the default file keeper ────────────────────────────────────────────────────────────────────────────────────────
+
+/// Keep a private upload as the caller's own file, size-checked. What `ComposerTarget.Keep` does unless overridden. Only
+/// the browser or the person that uploaded it may keep it — SECURITY-INVARIANT(a-private-upload-is-its-uploaders), guarded
+/// by tests/drafts.test.osy (a_file_someone_else_uploaded_is_not_theirs_to_attach).
+public ComposerFile KeepPrivately(UploadedFile upload) {
+  if (!upload.Path.StartsWith("uploads/")) {
+    throw new ValidationException("Only a file just uploaded privately can be attached — upload it with `privately: true`.");
+  }
+  if (!File.IsOwnUpload(upload.Path)) {
+    throw new ValidationException("That file was uploaded somewhere else — in another browser, or before you signed out. Please upload it again.");
+  }
+  var bytes = File.ReadAllBytes(upload.Path);
+  var name = CleanFileName(upload.FileName);
+  var limit = App.Setting<ComposerSetup>().MaxFileBytes;
+  if (bytes.Length > limit) {
+    throw new ValidationException($"{name} is {SizeOf(bytes.Length)}, and a file may be at most {SizeOf(limit)}. "
+      + "Send a smaller one — a cropped screenshot, or the part of the log that matters.");
+  }
+  var type = upload.ContentType == "" ? "application/octet-stream" : upload.ContentType;
+  var file = File.Create(name, type, bytes);
+  File.Delete(upload.Path);
+  return new ComposerFile { Id = file.Id, Name = name, Size = bytes.Length, Picture = type.StartsWith("image/") };
+}
+
+/// "3.4 MB", "820 KB".
+public string SizeOf(long bytes) {
+  if (bytes < 1024 * 1024) { return Convert.ToString((bytes + 1023) / 1024) + " KB"; }
+  return Math.Round((decimal)bytes / (1024m * 1024m), 1).ToString() + " MB";
+}
+
+/// A file name safe to keep and give back: no path, no control characters, at most 255 characters.
+public string CleanFileName(string name) {
+  var n = name.Replace("\\", "/");
+  var slash = n.LastIndexOf("/");
+  if (slash >= 0) { n = n.Substring(slash + 1); }
+  n = Regex.Replace(n, "[\\x00-\\x1F\\x7F\"<>|:*?]", "_").Trim();
+  if (n == "" || n == "." || n == "..") { n = "attachment"; }
+  return n.Length > 255 ? n.Substring(n.Length - 255) : n;
+}
+
+/// The target for `kind` — refused, naming the kinds there are, when the app set none up.
+public ComposerTarget TargetFor(string kind) {
+  var targets = App.Setting<ComposerSetup>().Targets;
+  foreach (var t in targets) { if (t.Kind == kind) { return t; } }
+  if (targets.Count == 0) {
+    throw new ValidationException("No composer is set up — name a target in app.Composer (`Targets = [new …]`).");
+  }
+  throw new ValidationException($"No composer is set up for '{kind}'. The kinds are: "
+    + string.Join(", ", targets.Select(t => t.Kind == "" ? "(the default)" : t.Kind)) + ".");
+}

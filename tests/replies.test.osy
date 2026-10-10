@@ -1,0 +1,96 @@
+// SAVED REPLIES AND PLACEHOLDERS — typed, never a string template the writer can break: a key nobody declared is
+// refused when the reply is saved, a key the record cannot fill is refused when it is sent.
+using Osysharp.Identity;
+using Osysharp.ReplyComposer;
+using ComposerKitTests;
+
+[Test(Building)]
+[runas(Ada)]
+void a_reply_naming_a_key_nobody_declared_is_refused_when_saved_naming_every_key_there_is() {
+  var refused = Assert.Throws<ValidationException>(() =>
+    SaveSavedReply(null, "", "Heating", "Hi {{tenant.frist_name}}, we are on it.", "Heating", true));
+  Assert.Contains("{{tenant.frist_name}} is not a placeholder", refused.Message);
+  Assert.Contains("{{tenant.first_name}} (Tenant's first name)", refused.Message);
+  // An opening with no closing is refused too — it would reach a tenant as "{{tenant.first_name,".
+  var open = Assert.Throws<ValidationException>(() =>
+    SaveSavedReply(null, "", "Heating", "Hi {{tenant.first_name, we are on it.", "Heating", true));
+  Assert.Contains("never closed", open.Message);
+  Assert.Equal(0, SavedReply.Count());
+  // ⭐ THE COUNTERPART — the declared key saves, so the refusals above are about the key, not every placeholder.
+  SaveSavedReply(null, "", "Heating", "Hi {{tenant.first_name}}, we are on it — {{request.number}}.", "Heating", true);
+  Assert.Equal(1, SavedReply.Count());
+}
+
+[Test(Building)]
+[runas(Ada)]
+void inserting_a_reply_fills_it_from_the_record_and_a_missing_name_takes_its_stand_in() {
+  var id = SaveSavedReply(null, "", "Heating", "Hi {{tenant.first_name}},\n\nAbout {{request.number}}: a fitter comes tomorrow.\n\n{{me.first_name}}", "Heating", true);
+  var filled = InsertSavedReply(id, RequestId(101));
+  Assert.Equal("Hi Hanna,\n\nAbout #101: a fitter comes tomorrow.\n\nAda", filled.Text);
+  Assert.Equal(0, filled.Unfilled.Count);
+  // No name on record: the stand-in the app declared ("there"), never "Hi ,".
+  Assert.StartsWith("Hi there,", InsertSavedReply(id, RequestId(103)).Text);
+  // Every insertion is a use, written by the writer — the shared reply itself is never written to.
+  Assert.Equal(2, ComposerUse.Count(u => u.What == id));
+}
+
+[Test(Building)]
+[runas(Ada)]
+void a_placeholder_the_record_cannot_fill_stays_marked_and_refuses_the_send_until_replaced() {
+  var id = SaveSavedReply(null, "", "Access", "We will come to flat {{request.unit}} at 9.", "Access", true);
+  // #102's tenant gave no flat, and a flat has no sensible stand-in.
+  var filled = InsertSavedReply(id, RequestId(102));
+  Assert.Equal("We will come to flat {{request.unit}} at 9.", filled.Text);
+  Assert.Equal("Flat", filled.Unfilled.Single().Label);
+  var refused = Assert.Throws<ValidationException>(() =>
+    SendFromComposer("", RequestId(102), filled.Text, false, [], "", -1, true, []));
+  Assert.Contains("Replace {{request.unit}} (Flat)", refused.Message);
+  Assert.Equal(0, RequestReply.Count());
+  // Replaced by hand, it sends.
+  SendFromComposer("", RequestId(102), "We will come to flat 3C at 9.", false, [], "", -1, true, []);
+  Assert.Equal(1, RequestReply.Count());
+  // A `{{…}}` that is NOT the app's own key is the writer's business — a reply may be about templates.
+  SendFromComposer("", RequestId(102), "Your portal template should read {{name}}.", false, [], "", -1, true, []);
+  Assert.Equal(2, RequestReply.Count());
+}
+
+[Test(Building)]
+void the_teams_replies_are_a_leads_to_keep_and_everyones_to_use_and_ones_own_are_private() {
+  Guid team = Guid.Empty;
+  runas (Ada) { team = SaveSavedReply(null, "", "Lift engineer booked", "The engineer is booked.", "Lift", true); }
+  runas (Raj) {
+    // Raj reads and uses the team's reply…
+    Assert.Equal(1, SavedReply.Count());
+    InsertSavedReply(team, RequestId(102));
+    // …but may not change it, nor make one for the team…
+    Assert.Denied(() => SaveSavedReply(team, "", "Lift engineer booked", "Changed.", "Lift", true));
+    // …and keeps his own, which nobody else reads.
+    SaveSavedReply(null, "", "My lift line", "On my way up.", "Lift", false);
+    Assert.Equal(2, SavedReply.Count());
+  }
+  runas (Ada) { Assert.Equal(1, SavedReply.Count()); }
+  runas (Tom) { Assert.Equal(0, SavedReply.Count()); }
+}
+
+/// ⭐ A REPLY'S USES ARE COUNTED BY THE DATABASE — the settings list reads one row per reply however often each has been
+/// used: a reply used forty times costs it what one used once does.
+[Test(Building)]
+[runas(Ada)]
+void how_often_a_reply_was_used_reads_a_row_per_reply_not_a_row_per_use() {
+  var often = SaveSavedReply(null, "", "Heating", "We are on it — {{request.number}}.", "Heating", true);
+  var once = SaveSavedReply(null, "", "Lift", "The engineer is booked.", "Lift", true);
+  InsertSavedReply(often, RequestId(101));
+  InsertSavedReply(once, RequestId(101));
+  var mark = Cost.Mark();
+  var uses = UsesOf([often, once]);
+  var rows = Cost.RowsReadSince(mark);
+  Assert.Equal(1, uses[often]);
+  for (var i = 0; i < 39; i++) { InsertSavedReply(often, RequestId(101)); }
+  var again = Cost.Mark();
+  uses = UsesOf([often, once]);
+  var after = Cost.RowsReadSince(again);
+  Log.Information("Uses of two replies: " + rows + " rows read at 1 use each, " + after + " at 40 and 1");
+  Assert.Equal(rows, after);
+  Assert.Equal(40, uses[often]);
+  Assert.Equal(1, uses[once]);
+}

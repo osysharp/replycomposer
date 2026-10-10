@@ -1,0 +1,110 @@
+namespace Osysharp.ReplyComposer;
+
+using Osysharp.Identity;
+using Osysharp.Storage;
+
+// SENDING — the one way a composer's words leave it. In order: checked (length, placeholders nobody filled), signed
+// (a reply the writer kept signed — never a note), handed to the app's `ComposerTarget.Send`, then the staged macro
+// steps run, then the draft is deleted. A refusal anywhere before the app sent leaves the draft exactly as it was.
+
+/// What a send did, for the writer.
+public class ComposerSent {
+  /// "Sent." — or the app's own sentence, then what each step did.
+  public string Said = "";
+  /// A step that did not run AFTER the message went (the message is sent; this is what still needs doing by hand).
+  public string StepProblem = "";
+}
+
+/// Send what the writer wrote on record `item`. `signed`: put their signature under it (a reply only). `after`: a
+/// "send and set…" choice, "" for none. `steps`: staged macro steps, run after the send. With no words and no files,
+/// only the steps run ("Apply").
+public ComposerSent SendFromComposer(string kind, Guid item, string text, bool note, List<Guid> files, string after,
+                                     long seen, bool signed, List<StagedStep> steps) {
+  var target = TargetFor(kind);
+  var setup = App.Setting<ComposerSetup>();
+  var words = text.Trim();
+  var sent = new ComposerSent();
+  if (words == "" && files.Count == 0) {
+    if (steps.Count == 0) { throw new ValidationException(note ? "Write the note first." : "Write the reply first."); }
+    sent.Said = string.Join(" ", RunSteps(kind, item, steps));
+    DiscardAfterSend(item);
+    return sent;
+  }
+  if (words.Length > setup.MaxLength) {
+    throw new ValidationException($"This {(note ? "note" : "reply")} is {words.Length} characters, and one may be at most "
+      + $"{setup.MaxLength}. Shorten it, or send it in two.");
+  }
+  var left = LeftIn(kind, words);
+  if (left.Count > 0) {
+    throw new ValidationException("Replace " + string.Join(", ", left.Select(p => "{{" + p.Key + "}} (" + p.Label + ")"))
+      + " before sending — there is nothing on record to put there.");
+  }
+  // Who a note names — found in its words, every one of them allowed here, or the note is refused naming why.
+  var mentions = note ? MentionsIn(target, item, words) : [];
+  var signature = SignatureLines(target.Signature());
+  var body = !note && signed && signature != "" ? words + "\n\n" + signature : words;
+  var said = target.Send(new ComposerSend { Item = item, Text = body, Note = note, Files = files, After = after, Seen = seen,
+                                            Mentions = mentions });
+  sent.Said = said != "" ? said : (note ? "Note added." : "Sent.");
+  // The message is out. A step refused now does not unsend it — it is said, so the writer does it by hand.
+  try {
+    var done = RunSteps(kind, item, steps);
+    if (done.Count > 0) { sent.Said = sent.Said + " " + string.Join(" ", done); }
+  } catch (ValidationException ex) {
+    sent.StepProblem = ex.Message;
+  }
+  DiscardAfterSend(item);
+  return sent;
+}
+
+/// A signature as markdown that keeps its lines: "Ines Moreau\nHarbour support" would otherwise run together as one
+/// paragraph, so each line ends in a hard break. Plain text (a mail) reads it unchanged.
+public string SignatureLines(string signature) {
+  var lines = signature.Replace("\r", "").Trim().Split("\n").Select(l => l.TrimEnd()).ToList();
+  return string.Join("  \n", lines);
+}
+
+void DiscardAfterSend(Guid item) {
+  var me = Session.CurrentUser!;
+  var draft = ComposerDraft.FirstOrDefault(d => d.Item == item && d.Author == me);
+  if (draft != null) { DeleteDraft(draft); }
+  UnitOfWork.Commit();
+}
+
+/// Keep a file the writer added on record kind `kind`, as theirs until it is sent (`ComposerTarget.Keep`).
+public ComposerFile KeepComposerFile(string kind, UploadedFile upload) {
+  var kept = TargetFor(kind).Keep(upload);
+  UnitOfWork.Commit();
+  return kept;
+}
+
+/// The people `words` names, by their keys, once each in the order written — the longest name first, so "@Ines Moreau"
+/// is Ines Moreau and not Ines. Refused, with the app's reason, when it names somebody who may not be named on `item`.
+List<string> MentionsIn(ComposerTarget target, Guid item, string words) {
+  if (!words.Contains("@")) { return []; }
+  List<MentionChoice> named = [];
+  foreach (var choice in target.Mentionable(item).OrderByDescending(c => c.Name.Length).ToList()) {
+    if (!Names(words, choice.Name)) { continue; }
+    // A shorter name inside one already found ("Ines" in "@Ines Moreau") is that one, not a second.
+    if (named.Any(t => t.Name.ToLower().StartsWith(choice.Name.ToLower()))) { continue; }
+    if (choice.Refusal != "") { throw new ValidationException(choice.Refusal); }
+    named.Add(choice);
+  }
+  var lower = words.ToLower();
+  List<string> keys = [];
+  foreach (var c in named.OrderBy(c => lower.IndexOf("@" + c.Name.Trim().ToLower())).ToList()) {
+    if (!keys.Contains(c.Key)) { keys.Add(c.Key); }
+  }
+  return keys;
+}
+
+/// Who a note on record `item` (of kind `kind`) may name — offered as the writer types `@`.
+[Authorize(ComposesReplies)]
+public List<MentionChoice> ComposerMentionable(string kind, Guid item) {
+  return TargetFor(kind).Mentionable(item);
+}
+
+/// Tell the app the writer started or stopped writing on `item` (`ComposerTarget.Writing`).
+public void ComposerWriting(string kind, Guid item, string doing) {
+  TargetFor(kind).Writing(item, doing);
+}

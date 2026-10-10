@@ -1,0 +1,326 @@
+// THE SETTINGS PAGES' CONTENT — saved replies and macros, for an app to put on pages of its own (each is a
+// `SettingsPage`, so it sits in the app's settings area like any other section). Everyone who composes keeps their own
+// here; who keeps the TEAM's is the app's `ManagesSavedReplies`.
+//
+// ⚑ A REPLY IS SAVED WHEN ITS PLACEHOLDERS ARE RIGHT. "Insert a placeholder" puts a declared key where the cursor is;
+//   one typed by hand that nobody declared is refused when Save is pressed, naming every key there is — so a reply
+//   that would send "{{customer.frist_name}}" to a customer never exists.
+namespace Osysharp.ReplyComposer;
+
+using Osysharp.Ui;
+
+/// The Composer's part of the app's settings area: "Saved replies" and "Macros", for everyone who
+/// writes with a composer — each keeps their own there, and whoever keeps the team's sees those too. Discovered, never
+/// wired. An app takes a page over by declaring a component of the same name (`ComposerRepliesSettings`).
+public class ComposerSettingsSections : ISettingsProvider {
+  public SettingsLink[] Sections() {
+    return [
+      new SettingsLink { Label = "Saved replies", To = "/settings/replies", Group = "Replies", Icon = Icons.Message, Order = 40,
+                         Shown = ComposesReplies, Hint = "Replies written once and sent often, with placeholders filled from the record." },
+      new SettingsLink { Label = "Macros", To = "/settings/macros", Group = "Replies", Icon = Icons.Bolt, Order = 41,
+                         Shown = ComposesReplies, Hint = "A reply and the things that go with it, applied in one move." },
+    ];
+  }
+}
+
+/// The saved replies, as a settings page.
+[Route("/settings/replies")] [Layout(SettingsFrame)] [Authorize(ComposesReplies)] [Render(CSR)] [Title("Saved replies")]
+public component ComposerRepliesSettings() { render { SavedReplySettings(); } }
+
+/// The macros, as a settings page.
+[Route("/settings/macros")] [Layout(SettingsFrame)] [Authorize(ComposesReplies)] [Render(CSR)] [Title("Macros")]
+public component ComposerMacroSettings() { render { MacroSettings(); } }
+
+/// Saved replies — the team's and the reader's own — for record kind `kind`.
+[Composable]
+public component SavedReplySettings(string kind = "") {
+  live var replies = SavedReply.Where(r => r.Kind == kind).Include(r => r.Owner).OrderBy(r => r.Category).ThenBy(r => r.Title).ToList();
+  List<PlaceholderInfo> placeholders = [];
+  Dictionary<Guid, int> uses = new Dictionary<Guid, int>();
+  bool editing = false;
+  bool picking = false;
+  Guid? editingId = null;
+  string title = "";
+  string body = "";
+  string category = "";
+  bool shared = false;
+  int from = 0;
+  int until = 0;
+  string problem = "";
+  string notice = "";
+  bool manager = false;
+
+  on mount {
+    placeholders = PlaceholdersFor(kind);
+    uses = UsesOf(replies.Select(r => r.Id).ToList());
+    manager = KeepsTeamReplies();
+  }
+
+  action Add() {
+    editingId = null; title = ""; body = ""; category = ""; shared = manager; problem = ""; editing = true;
+  }
+  action Edit(SavedReply r) {
+    editingId = r.Id; title = r.Title; body = r.Body; category = r.Category; shared = r.Owner == null; problem = "";
+    editing = true;
+  }
+  action Close() { editing = false; picking = false; }
+  action Pick() { picking = !picking; }
+  action Put(string key) {
+    picking = false;
+    // A placeholder sits IN a sentence ("Hi {{customer.first_name}},"), so it goes exactly where the cursor is.
+    var a = Math.Min(from, until);
+    var b = Math.Max(from, until);
+    body = body.Substring(0, Math.Min(a, body.Length)) + "{{" + key + "}}" + body.Substring(Math.Min(b, body.Length));
+    from = a + key.Length + 4;
+    until = from;
+  }
+  action Save() {
+    problem = "";
+    try {
+      SaveSavedReply(editingId, kind, title, body, category, shared);
+      notice = "“" + title.Trim() + "” saved.";
+      editing = false;
+      uses = UsesOf(replies.Select(r => r.Id).ToList());
+    } catch (Exception ex) { problem = ex.Message; }
+  }
+  action Remove() {
+    problem = "";
+    try {
+      RemoveSavedReply(editingId!.Value);
+      notice = "“" + title.Trim() + "” removed.";
+      editing = false;
+    } catch (Exception ex) { problem = ex.Message; }
+  }
+
+  int Used(Guid id) => uses.ContainsKey(id) ? uses[id] : 0;
+
+  render {
+    SettingsPage("Saved replies", description: "Replies written once and sent often — find them from the reply box, under Saved replies. The team's are everyone's; your own are yours.") {
+      SettingsSection("Every saved reply") {
+        if (notice != "") { Text(notice, fontSize: FontSize.Caption, color: Colors.Success); }
+        Stack(gap: 0, role: UiRole.List, label: "Replies") {
+          if (replies.Count == 0) {
+            EmptyState("No saved replies yet", body: "Write the answers you give again and again once — a reply can greet the customer by name with a placeholder.");
+          }
+          foreach (var r in replies) {
+            Row(gap: 3, align: Align.Center, py: 2, borderBW: 1, border: Colors.Border, role: UiRole.ListItem, label: r.Title) {
+              Stack(gap: 0, grow: 1, minW: "0") {
+                Text(r.Title, fontWeight: FontWeight.Medium);
+                Text((r.Category != "" ? r.Category + " · " : "") + (r.Owner == null ? "the team's" : "yours")
+                     + " · used " + Used(r.Id) + "×", fontSize: FontSize.Caption, color: Colors.TextMuted);
+                Text(FirstWords(r.Body), fontSize: FontSize.Caption, color: Colors.TextSecondary, whiteSpace: WhiteSpace.Nowrap,
+                     overflow: Overflow.Hidden, textOverflow: TextOverflow.Ellipsis, minW: "0");
+              }
+              Button("Edit", onPress: () => Edit(r), tone: Tone.Ghost, size: Size.Sm,
+                     disabled: r.Owner == null && !manager);
+            }
+          }
+        }
+        Row { Button("Add a reply", onPress: Add, tone: Tone.Ghost, size: Size.Sm); }
+      }
+    }
+    if (editing) {
+      Dialog(editingId == null ? "New saved reply" : title, onDismiss: Close,
+             subtitle: "Its placeholders are filled from the record each time it is used.") {
+        Field("Title", value: title, placeholder: "Refund on its way");
+        Field("Category", value: category, placeholder: "Billing");
+        ReplyBodyEditor("Reply", body, from, until, placeholders, picking, Pick, Put);
+        if (manager) { Checkbox("The whole team's — everyone can use it", value: shared); }
+        if (problem != "") { Alert(problem, tone: Tone.Danger); }
+        Row(gap: 2, justify: Justify.Between) {
+          if (editingId != null) { Button("Remove the reply", onPress: Remove, tone: Tone.Danger); } else { Spacer(); }
+          Row(gap: 2) {
+            Button("Cancel", onPress: Close, tone: Tone.Ghost);
+            Button("Save", onPress: Save, tone: Tone.Primary);
+          }
+        }
+      }
+    }
+  }
+}
+
+/// The words of a saved reply or macro, with "Insert a placeholder" — which puts a declared key where the cursor is.
+[Composable]
+component ReplyBodyEditor(string label, Binding<string> body, Binding<int> from, Binding<int> until,
+                          List<PlaceholderInfo> placeholders, bool picking, Action onPick, Action<string> onPut) {
+  render {
+    Stack(gap: 1) {
+      Row(gap: 2, align: Align.End) {
+        Text(label, fontSize: FontSize.Label, fontWeight: FontWeight.Medium, color: Colors.TextSecondary);
+        Spacer();
+        if (placeholders.Count > 0) {
+          Box(position: Position.Relative) {
+            Button("Insert a placeholder", onPress: onPick, tone: Tone.Ghost, size: Size.Sm);
+            if (picking) {
+              Menu(from: MenuFrom.BelowEnd, label: "Placeholders") {
+                foreach (var p in placeholders) { MenuItem(p.Label + "  {{" + p.Key + "}}", () => onPut(p.Key)); }
+              }
+            }
+          }
+        }
+      }
+      TextArea(value: body, selectionStart: from, selectionEnd: until, rows: 8, label: label,
+               w: "100%", px: 3, py: 2, rounded: Radius.Md, borderW: 1, border: Colors.Border, bg: Colors.Bg,
+               fontSize: FontSize.Body, lineHeight: 1.55, resize: Resize.Vertical);
+      Text("Markdown: **bold**, _italic_, - lists, [words](https://…).", fontSize: FontSize.Caption, color: Colors.TextMuted);
+    }
+  }
+}
+
+/// Macros — the team's and the reader's own — for record kind `kind`: a reply and the steps that go with it.
+[Composable]
+public component MacroSettings(string kind = "") {
+  live var macros = Macro.Where(m => m.Kind == kind).Include(m => m.Owner).OrderBy(m => m.Category).ThenBy(m => m.Title).ToList();
+  live var allSteps = MacroStep.Where(s => s.Macro.Kind == kind).OrderBy(s => s.Position).ToList();
+  List<PlaceholderInfo> placeholders = [];
+  List<MacroAction> actions = [];
+  bool editing = false;
+  bool picking = false;
+  string adding = "";        // "" closed · "action" choosing an action · otherwise the action whose choice is being chosen
+  Guid? editingId = null;
+  string title = "";
+  string body = "";
+  string category = "";
+  bool asNote = false;
+  bool shared = false;
+  List<StagedStep> steps = [];
+  int from = 0;
+  int until = 0;
+  string problem = "";
+  string notice = "";
+
+  bool manager = false;
+
+  on mount {
+    placeholders = PlaceholdersFor(kind);
+    actions = ActionsFor(kind);
+    manager = KeepsTeamReplies();
+  }
+
+  action Add() {
+    editingId = null; title = ""; body = ""; category = ""; asNote = false; shared = manager; steps = [];
+    problem = ""; adding = ""; editing = true;
+  }
+  action Edit(Macro m) {
+    editingId = m.Id; title = m.Title; body = m.Body; category = m.Category; asNote = m.AsNote; shared = m.Owner == null;
+    steps = StepsOf(m.Id); problem = ""; adding = ""; editing = true;
+  }
+  action Close() { editing = false; picking = false; adding = ""; }
+  action Pick() { picking = !picking; }
+  action Put(string key) {
+    picking = false;
+    var a = Math.Min(from, until);
+    var b = Math.Max(from, until);
+    body = body.Substring(0, Math.Min(a, body.Length)) + "{{" + key + "}}" + body.Substring(Math.Min(b, body.Length));
+    from = a + key.Length + 4;
+    until = from;
+  }
+  action StartStep() { adding = adding == "" ? "action" : ""; }
+  action CloseStep() { adding = ""; }
+  action ChooseAction(MacroAction v) {
+    if (v.Choices.Count == 0) { AddStep(v, ""); } else { adding = v.Name; }
+  }
+  action AddStep(MacroAction v, string choice) {
+    var next = steps.ToList();
+    next.Add(new StagedStep { Action = v.Name, Parameter = v.Parameter, Choice = choice, Label = StepLabel(v, choice) });
+    steps = next;
+    adding = "";
+  }
+  action DropStep(StagedStep s) { steps = steps.Where(x => !(x.Action == s.Action && x.Choice == s.Choice)).ToList(); }
+  action Save() {
+    problem = "";
+    try {
+      SaveMacro(editingId, kind, title, category, body, asNote, shared, steps);
+      notice = "“" + title.Trim() + "” saved.";
+      editing = false;
+    } catch (Exception ex) { problem = ex.Message; }
+  }
+  action Remove() {
+    problem = "";
+    try {
+      RemoveMacro(editingId!.Value);
+      notice = "“" + title.Trim() + "” removed.";
+      editing = false;
+    } catch (Exception ex) { problem = ex.Message; }
+  }
+
+  string Does(Macro m) {
+    var mine = allSteps.Where(s => s.Macro.Id == m.Id).Select(s => s.Label).ToList();
+    var words = m.Body.Trim() == "" ? "" : (m.AsNote ? "Writes a note" : "Writes a reply");
+    if (mine.Count == 0) { return words; }
+    return (words != "" ? words + " · " : "") + string.Join(" · ", mine);
+  }
+
+  render {
+    SettingsPage("Macros", description: "A reply and the things that go with it, in one move — “Refund on its way” writes the reply, tags the ticket and sets it Pending. Applying one puts it in the reply box; its steps run when you send.") {
+      SettingsSection("Every macro") {
+        if (notice != "") { Text(notice, fontSize: FontSize.Caption, color: Colors.Success); }
+        Stack(gap: 0, role: UiRole.List, label: "Macros") {
+          if (macros.Count == 0) {
+            EmptyState("No macros yet", body: "Make one for the answer that always comes with a status change or a tag.");
+          }
+          foreach (var m in macros) {
+            Row(gap: 3, align: Align.Center, py: 2, borderBW: 1, border: Colors.Border, role: UiRole.ListItem, label: m.Title) {
+              Stack(gap: 0, grow: 1, minW: "0") {
+                Text(m.Title, fontWeight: FontWeight.Medium);
+                Text((m.Category != "" ? m.Category + " · " : "") + (m.Owner == null ? "the team's" : "yours"),
+                     fontSize: FontSize.Caption, color: Colors.TextMuted);
+                Text(Does(m), fontSize: FontSize.Caption, color: Colors.TextSecondary, whiteSpace: WhiteSpace.Nowrap,
+                     overflow: Overflow.Hidden, textOverflow: TextOverflow.Ellipsis, minW: "0");
+              }
+              Button("Edit", onPress: () => Edit(m), tone: Tone.Ghost, size: Size.Sm,
+                     disabled: m.Owner == null && !manager);
+            }
+          }
+        }
+        Row { Button("Add a macro", onPress: Add, tone: Tone.Ghost, size: Size.Sm); }
+      }
+    }
+    if (editing) {
+      Dialog(editingId == null ? "New macro" : title, onDismiss: Close,
+             subtitle: "Applying it writes its reply into the box; its steps run when the reply is sent.") {
+        Field("Title", value: title, placeholder: "Refund on its way");
+        Field("Category", value: category, placeholder: "Billing");
+        ReplyBodyEditor("Reply (optional)", body, from, until, placeholders, picking, Pick, Put);
+        Checkbox("Write it as an internal note", value: asNote);
+        Stack(gap: 1, label: "Steps") {
+          FieldLabel("Steps, in order");
+          if (steps.Count == 0) { Text("None — it only writes the reply.", fontSize: FontSize.Caption, color: Colors.TextMuted); }
+          foreach (var s in steps) {
+            Row(gap: 2, align: Align.Center, label: s.Label) {
+              Icon(Icons.Bolt, size: 12, color: Colors.Primary);
+              Text(s.Label, fontSize: FontSize.Label, grow: 1);
+              IconButton("Remove " + s.Label, () => DropStep(s), size: Size.Sm, tone: Tone.Ghost) { Icon(Icons.Close, size: 10); }
+            }
+          }
+          if (actions.Count > 0) {
+            Box(position: Position.Relative) {
+              Button("Add a step", onPress: StartStep, tone: Tone.Ghost, size: Size.Sm);
+              if (adding == "action") {
+                Backdrop(CloseStep);
+                Menu(from: MenuFrom.BelowStart, label: "Add a step") {
+                  foreach (var v in actions) { MenuItem(v.Label, () => ChooseAction(v)); }
+                }
+              }
+              foreach (var v in actions.Where(x => x.Name == adding)) {
+                Backdrop(CloseStep);
+                Menu(from: MenuFrom.BelowStart, label: v.Label) {
+                  foreach (var c in v.Choices) { MenuItem(c.Label, () => AddStep(v, c.Key)); }
+                }
+              }
+            }
+          }
+        }
+        if (manager) { Checkbox("The whole team's — everyone can use it", value: shared); }
+        if (problem != "") { Alert(problem, tone: Tone.Danger); }
+        Row(gap: 2, justify: Justify.Between) {
+          if (editingId != null) { Button("Remove the macro", onPress: Remove, tone: Tone.Danger); } else { Spacer(); }
+          Row(gap: 2) {
+            Button("Cancel", onPress: Close, tone: Tone.Ghost);
+            Button("Save", onPress: Save, tone: Tone.Primary);
+          }
+        }
+      }
+    }
+  }
+}

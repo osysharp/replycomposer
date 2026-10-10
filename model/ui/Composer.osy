@@ -1,0 +1,524 @@
+// THE COMPOSER — where a person writes a reply or a note on a record. The app places it (a ticket's foot, a case's
+// side) and themes it; every colour, face and size is a token.
+//
+// ⚑ IT IS A WELL, NOT A CHAT BOX: the mode (Reply / Internal note) and who it goes to on top; a bar of formatting, saved
+//   replies and macros; the box; what goes with it (staged steps, files, the signature); and the actions at the foot —
+//   Send with its key, "Send and set…", and, quietly at the end, whether the draft is saved. A note tints the whole
+//   well amber, so nobody mistakes which one they are writing.
+namespace Osysharp.ReplyComposer;
+
+using Osysharp.Ui;
+using Osysharp.Storage;
+
+/// The keys a composer binds — each "" for none. The app decides; the `?` sheet lists whatever is bound.
+public class ComposerKeys {
+  /// Write a reply (and put the cursor in the box).
+  public string Reply = "";
+  /// Write an internal note.
+  public string Note = "";
+  /// Open the macros.
+  public string Macro = "";
+  /// Open the saved replies.
+  public string SavedReply = "";
+  public string Send = "Mod+Enter";
+  public string Bold = "Mod+B";
+  public string Italic = "Mod+I";
+}
+
+/// Write on record `item`: a reply (or, with `notes`, an internal note), formatted in markdown, from a saved reply or a
+/// macro, signed, with files — saved as a draft as it is written, and sent through the app's `ComposerTarget`.
+/// `audience` says who reads a reply ("To Hanna Lindqvist · email"); `replyLabel` names the box ("Reply to Hanna"). `seen` is what the page shows of the record right
+/// now (a timeline's last place, a version) — the composer remembers it as the writer starts, and hands it to `Send`,
+/// so an app can refuse a reply over something that arrived meanwhile. `manageAt` is where saved replies are kept, for
+/// the empty picker to point to. `opened`: what the page already asked for this record (`OpenComposer(kind, item)`, as
+/// part of one call for everything it opens with) — then the composer asks nothing of its own as it opens. Hand it
+/// once it has `Loaded`; one that has not is asked for again.
+[Composable]
+public component Composer(Guid item, string kind = "", string audience = "", bool notes = true, long seen = -1,
+                          ComposerKeys? keymap = null, string manageAt = "", string replyLabel = "Reply",
+                          string placeholder = "Write your reply…",
+                          string notePlaceholder = "A note for the team. The customer never sees it.",
+                          ComposerOpening? opened = null) {
+  string text = "";
+  int from = 0;
+  int until = 0;
+  bool note = false;
+  bool ready = false;
+  bool preview = false;
+  bool sign = true;
+  bool focus = false;
+  bool sending = false;
+  string menu = "";
+  string problem = "";
+  string notice = "";
+  string lastSaved = "";
+  string announced = "viewing";
+  long started = -1;
+  List<PlaceholderInfo> unfilled = [];
+  List<ComposerFile> files = [];
+  List<StagedStep> steps = [];
+  ComposerOpening opening = new ComposerOpening();
+  // What "Discard" threw away, until the writer types again — so Undo can put it back.
+  ComposerOpening? discarded = null;
+  // Who a note may name (`@`) — fetched the first time the writer types one, once.
+  List<MentionChoice> people = [];
+  bool peopleAsked = false;
+
+  live var bound = keymap ?? new ComposerKeys();
+  // THE DRAFTS ON THIS RECORD THE READER MAY SEE — their own, and one prepared for whoever writes next. Live, so "Draft
+  // saved" is what the server holds (never what the page hopes it sent), and a draft an assistant prepares while the
+  // page is open is offered at once.
+  live var drafts = ComposerDraft.Where(d => d.Item == item).ToList();
+  live var mine = drafts.FirstOrDefault(d => d.Author != null);
+  live var prepared = drafts.Where(d => d.Author == null).OrderByDescending(d => d.SavedAt).FirstOrDefault();
+
+  on mount {
+    try {
+      opening = opened != null && opened.Loaded ? opened : OpenComposer(kind, item);
+      text = opening.Text;
+      note = notes && opening.Note;
+      files = opening.Files;
+      steps = opening.Steps;
+      if (opening.SavedAt != null) { started = seen; }
+    } catch (Exception ex) { problem = ex.Message; }
+    lastSaved = Snapshot();
+    ready = true;
+  }
+
+  // THE DRAFT IS SAVED AS IT IS WRITTEN — every two seconds while it changes, and not at all while it does not.
+  on every (TimeSpan.FromSeconds(2)) { SaveNow(); }
+
+  action SaveNow() {
+    if (ready && !sending && Snapshot() != lastSaved) {
+      var now = Snapshot();
+      try {
+        SaveDraft(kind, item, text, note, files, steps);
+        lastSaved = now;
+      } catch (Exception ex) { problem = ex.Message; }
+    }
+  }
+
+  /// Everything a draft holds, as one comparable string.
+  string Snapshot() => text + "\u0001" + (note ? "n" : "r") + "\u0001" + string.Join(",", files.Select(f => f.Id.ToString()))
+    + "\u0001" + string.Join(",", steps.Select(s => s.Action + "=" + s.Choice));
+
+  // ── writing ───────────────────────────────────────────────────────────────────────────────────────────────────
+  action Typed() {
+    notice = "";
+    discarded = null;
+    if (text.Trim() != "" && started < 0) { started = seen; }
+    if (text.Trim() == "" && files.Count == 0) { started = -1; }
+    if (note && !peopleAsked && text.Contains("@")) { AskPeople(); }
+    Announce();
+  }
+  action AskPeople() {
+    peopleAsked = true;
+    try { people = ComposerMentionable(kind, item); } catch (Exception ex) { people = []; }
+  }
+  /// The writer picked somebody to name.
+  action Mention(MentionChoice who) {
+    var typing = MentionAt(text, from);
+    if (!typing.Active) { return; }
+    Edited(PickMention(text, from, typing, who.Name));
+  }
+  action Announce() {
+    var doing = text.Trim() == "" ? "viewing" : (note ? "writing a note" : "replying");
+    if (doing != announced) {
+      announced = doing;
+      try { ComposerWriting(kind, item, doing); } catch (Exception ex) { }
+    }
+  }
+  action Edited(TextEdit e) {
+    text = e.Text;
+    from = e.From;
+    until = e.To;
+    preview = false;
+    focus = true;
+    Typed();
+  }
+  // Leaving the box saves at once — a writer who clicks away and closes the tab within two seconds loses nothing.
+  action Blurred() { focus = false; SaveNow(); }
+  action Reply() { note = false; preview = false; focus = true; Announce(); }
+  action Note() { if (notes) { note = true; preview = false; focus = true; Announce(); } }
+
+  // ── formatting ────────────────────────────────────────────────────────────────────────────────────────────────
+  action Bold() { Edited(Wrap(text, from, until, "**", "bold")); }
+  action Italic() { Edited(Wrap(text, from, until, "_", "italic")); }
+  action Code() { Edited(Wrap(text, from, until, "`", "code")); }
+  action LinkIt() { Edited(Linked(text, from, until)); }
+  action Bullets() { Edited(Lines(text, from, until, "- ")); }
+  action Numbers() { Edited(Lines(text, from, until, "1. ")); }
+  action Quote() { Edited(Lines(text, from, until, "> ")); }
+  action TogglePreview() { preview = !preview; }
+
+  // ── saved replies and macros ──────────────────────────────────────────────────────────────────────────────────
+  action OpenReplies() { menu = menu == "replies" ? "" : "replies"; }
+  action OpenMacros() { menu = menu == "macros" ? "" : "macros"; }
+  action OpenAfter() { menu = menu == "after" ? "" : "after"; }
+  action CloseMenu() { menu = ""; }
+
+  action PickReply(Guid id) {
+    menu = "";
+    problem = "";
+    try {
+      var filled = InsertSavedReply(id, item);
+      Edited(Insert(text, from, until, filled.Text));
+      unfilled = filled.Unfilled;
+    } catch (Exception ex) { problem = ex.Message; }
+  }
+
+  action PickMacro(Guid id) {
+    menu = "";
+    problem = "";
+    try {
+      var m = ApplyMacro(id, item);
+      if (m.Text.Trim() != "") { Edited(Insert(text, from, until, m.Text)); }
+      if (notes && m.Note) { note = true; }
+      var next = steps.ToList();
+      foreach (var s in m.Steps) { next.Add(s); }
+      steps = next;
+      unfilled = m.Unfilled;
+      notice = "Applied “" + m.Title + "”" + (m.Steps.Count > 0 ? " — its steps run when you send." : ".");
+      if (m.Problems.Count > 0) { problem = string.Join(" ", m.Problems); }
+      Announce();
+    } catch (Exception ex) { problem = ex.Message; }
+  }
+
+  action Unstage(string action, string choice) {
+    var gone = false;
+    List<StagedStep> next = [];
+    foreach (var s in steps) {
+      if (!gone && s.Action == action && s.Choice == choice) { gone = true; } else { next.Add(s); }
+    }
+    steps = next;
+  }
+
+  action UsePrepared(Guid id) {
+    problem = "";
+    try {
+      var offer = TakePreparedDraft(id);
+      if (notes && offer.Note) { note = true; }
+      Edited(Insert(text, from, until, offer.Text));
+    } catch (Exception ex) { problem = ex.Message; }
+  }
+
+  // ── files ─────────────────────────────────────────────────────────────────────────────────────────────────────
+  action Took(UploadedFile upload) {
+    problem = "";
+    try {
+      var kept = KeepComposerFile(kind, upload);
+      var next = files.ToList();
+      next.Add(kept);
+      files = next;
+      Typed();
+    } catch (Exception ex) { problem = ex.Message; }
+  }
+  action Untake(Guid id) { files = files.Where(f => f.Id != id).ToList(); }
+
+  // ── sending ───────────────────────────────────────────────────────────────────────────────────────────────────
+  action SendAs(string after) {
+    menu = "";
+    problem = "";
+    notice = "";
+    sending = true;
+    try {
+      var sent = SendFromComposer(kind, item, text, note, files.Select(f => f.Id).ToList(), after, started, sign, steps);
+      text = "";
+      from = 0;
+      until = 0;
+      files = [];
+      steps = [];
+      unfilled = [];
+      note = false;
+      preview = false;
+      started = -1;
+      lastSaved = Snapshot();
+      notice = sent.Said;
+      if (sent.StepProblem != "") { problem = "Sent — but " + Lower(sent.StepProblem); }
+      Announce();
+    } catch (Exception ex) {
+      problem = ex.Message;
+      // They have now been told what arrived; the next press sends over it.
+      started = seen;
+    }
+    sending = false;
+  }
+  action Send() { SendAs(""); }
+
+  action Discard() {
+    discarded = new ComposerOpening { Text = text, Note = note, Files = files, Steps = steps };
+    try { DiscardDraft(kind, item); } catch (Exception ex) { problem = ex.Message; return; }
+    text = "";
+    files = [];
+    steps = [];
+    unfilled = [];
+    note = false;
+    preview = false;
+    started = -1;
+    lastSaved = Snapshot();
+    notice = "Draft discarded.";
+    Announce();
+  }
+  action Undo() {
+    if (discarded == null) { return; }
+    text = discarded.Text;
+    note = discarded.Note;
+    files = discarded.Files;
+    steps = discarded.Steps;
+    discarded = null;
+    notice = "";
+    Typed();
+  }
+
+  string Lower(string s) => s == "" ? s : s.Substring(0, 1).ToLower() + s.Substring(1);
+  bool Empty() => text.Trim() == "" && files.Count == 0;
+  string SendWord() => Empty() && steps.Count > 0 ? "Apply" : (note ? "Add note" : "Send");
+
+  render {
+    Stack(gap: 2, w: "100%", onFile: Took, label: "Composer") {
+      // ── the mode, and who reads it ──
+      Row(gap: 1, align: Align.Center, wrap: Wrapping.Wrap) {
+        ComposerMode("Reply", !note, Reply, bound.Reply);
+        if (notes) { ComposerMode("Internal note", note, Note, bound.Note); }
+        Spacer();
+        Text(note ? "Only the team sees this." : audience, color: note ? Colors.Warning : Colors.TextMuted,
+             fontSize: FontSize.Caption, whiteSpace: WhiteSpace.Nowrap, overflow: Overflow.Hidden,
+             textOverflow: TextOverflow.Ellipsis, minW: "0");
+      }
+
+      // ── a draft somebody prepared, offered, never sent by itself ──
+      if (prepared != null) {
+        Stack(gap: 1, px: 3, py: 2, rounded: Radius.Md, borderW: 1, border: Colors.Primary.Muted, bg: Colors.Primary.Subtle,
+              label: "Prepared draft") {
+          Row(gap: 2, align: Align.Center) {
+            Icon(Icons.Sparkles, size: 14, color: Colors.Primary);
+            Text("Prepared by " + prepared.PreparedBy, fontSize: FontSize.Label, fontWeight: FontWeight.Medium, grow: 1, minW: "0");
+            Text(prepared.SavedAt.ToString("HH:mm"), fontSize: FontSize.Caption, color: Colors.TextMuted, fontFamily: Font.Mono);
+            Button("Use it", onPress: () => UsePrepared(prepared.Id), size: Size.Sm, tone: Tone.Primary);
+          }
+          Text(prepared.Text, fontSize: FontSize.Label, color: Colors.TextSecondary, maxH: "3.6em", overflow: Overflow.Hidden);
+        }
+      }
+
+      // ── the well ──
+      Stack(gap: 0, position: Position.Relative, rounded: Radius.Md, borderW: 1, transition: Motion.Fast,
+            border: note ? Colors.Warning.Muted : Colors.Border, bg: note ? Colors.Warning.Subtle : Colors.Bg) {
+        Row(gap: "2px", align: Align.Center, px: 1, py: 1, borderBW: 1, border: note ? Colors.Warning.Muted : Colors.Border,
+            wrap: Wrapping.Wrap, role: UiRole.Toolbar, label: "Formatting") {
+          FormatKey("B", "Bold", Bold, bound.Bold, true, false);
+          FormatKey("I", "Italic", Italic, bound.Italic, false, true);
+          FormatKey("</>", "Code", Code, "", false, false);
+          FormatIcon("Link", LinkIt, Icons.Link);
+          FormatKey("•", "Bulleted list", Bullets, "", true, false);
+          FormatKey("1.", "Numbered list", Numbers, "", false, false);
+          FormatKey("❝", "Quote", Quote, "", false, false);
+          Box(w: "1px", h: "16px", bg: note ? Colors.Warning.Muted : Colors.Border, mx: 1, decorative: true) { }
+          Box(position: Position.Relative) {
+            ComposerBarButton("Saved replies", Icons.Message, OpenReplies, bound.SavedReply, menu == "replies", Layout.AtLeast(Phone));
+            if (menu == "replies") {
+              Backdrop(CloseMenu);
+              SavedReplyPicker(kind, PickReply, CloseMenu, manageAt);
+            }
+          }
+          Box(position: Position.Relative) {
+            ComposerBarButton("Macros", Icons.Bolt, OpenMacros, bound.Macro, menu == "macros", Layout.AtLeast(Phone));
+            if (menu == "macros") {
+              Backdrop(CloseMenu);
+              MacroPicker(kind, PickMacro, CloseMenu, manageAt);
+            }
+          }
+          Spacer();
+          ComposerBarButton(preview ? "Write" : "Preview", preview ? Icons.Pencil : Icons.Eye, TogglePreview, "", preview, Layout.AtLeast(Phone));
+        }
+        if (preview) {
+          Box(px: 3, py: 2, minH: Layout.AtLeast(Phone) ? "7.5rem" : "4.5rem", label: "Preview") {
+            if (text.Trim() == "") { Text("Nothing to preview yet.", color: Colors.TextMuted, fontSize: FontSize.Label); }
+            else { Markdown(text); }
+          }
+        } else {
+          TextArea(value: text, selectionStart: from, selectionEnd: until, autoFocus: focus, onInput: Typed, onBlur: Blurred,
+                   rows: Layout.AtLeast(Phone) ? 5 : 3, label: note ? "Internal note" : replyLabel,
+                   placeholder: note ? notePlaceholder : placeholder,
+                   w: "100%", px: 3, py: 2, borderW: 0, bg: Colors.Transparent, fontSize: FontSize.Body, lineHeight: 1.55,
+                   resize: Resize.Vertical);
+          // Typing `@` in a note offers the people it may name.
+          if (note && people.Count > 0) { MentionMenu(people, MentionAt(text, from), Mention); }
+        }
+      }
+
+      // ── what goes with it ──
+      if (steps.Count > 0) {
+        Row(gap: 1, align: Align.Center, wrap: Wrapping.Wrap, label: "Steps when you send") {
+          Text(Empty() ? "When you apply:" : "When you send:", fontSize: FontSize.Caption, color: Colors.TextMuted, mr: 1);
+          foreach (var s in steps) {
+            Row(gap: 1, align: Align.Center, pl: 2, pr: 1, py: "2px", rounded: Radius.Pill, bg: Colors.Muted, label: s.Label) {
+              Icon(Icons.Bolt, size: 12, color: Colors.Primary);
+              Text(s.Label, fontSize: FontSize.Caption);
+              IconButton("Take off " + s.Label, () => Unstage(s.Action, s.Choice), size: Size.Sm, tone: Tone.Ghost) { Icon(Icons.Close, size: 10); }
+            }
+          }
+        }
+      }
+      if (files.Count > 0) {
+        Row(gap: 2, wrap: Wrapping.Wrap, label: "Files to send") {
+          foreach (var f in files) {
+            Row(gap: 1, align: Align.Center, pl: 2, pr: 1, py: "2px", rounded: Radius.Md, borderW: 1, border: Colors.Border,
+                bg: Colors.Surface, label: f.Name) {
+              Icon(f.Picture ? Icons.Image : Icons.Paperclip, size: 12, color: Colors.TextMuted);
+              Text(f.Name, fontSize: FontSize.Caption, maxW: "16rem", whiteSpace: WhiteSpace.Nowrap, overflow: Overflow.Hidden,
+                   textOverflow: TextOverflow.Ellipsis);
+              Text(SizeOf(f.Size), fontSize: FontSize.Caption, color: Colors.TextMuted, fontFamily: Font.Mono);
+              IconButton("Remove " + f.Name, () => Untake(f.Id), size: Size.Sm, tone: Tone.Ghost) { Icon(Icons.Close, size: 10); }
+            }
+          }
+        }
+      }
+      foreach (var p in unfilled.Where(p => text.Contains("{{" + p.Key + "}}"))) {
+        Alert("Nothing on record fills {{" + p.Key + "}} (" + p.Label + ") — write what it should say before sending.",
+              tone: Tone.Warning);
+      }
+      if (!note && opening.Signature != "") {
+        Row(gap: 2, align: Align.Center, label: "Signature") {
+          Text(sign ? "Signed" : "Not signed", fontSize: FontSize.Caption, color: Colors.TextMuted);
+          if (sign) {
+            Text(opening.Signature.Replace("\n", " · "), fontSize: FontSize.Caption, color: Colors.TextSecondary,
+                 whiteSpace: WhiteSpace.Nowrap, overflow: Overflow.Hidden, textOverflow: TextOverflow.Ellipsis, minW: "0", grow: 1);
+          } else { Spacer(); }
+          Switch("Sign", value: sign);
+        }
+      }
+      if (problem != "") { Alert(problem, tone: Tone.Danger); }
+
+      // ── the actions ──
+      Row(gap: 2, align: Align.Center, wrap: Wrapping.Wrap) {
+        Button(SendWord(), onPress: Send, tone: note ? Tone.Warning : Tone.Primary, shortcut: bound.Send, showShortcut: true,
+               disabled: sending);
+        if (!note && opening.After.Count > 0) {
+          Box(position: Position.Relative) {
+            Button("Send and set…", onPress: OpenAfter, tone: Tone.Ghost);
+            if (menu == "after") {
+              Backdrop(CloseMenu);
+              Menu(from: MenuFrom.AboveStart, label: "Send and set") {
+                foreach (var a in opening.After) { MenuItem("Send and set " + a.Label, () => SendAs(a.Key)); }
+              }
+            }
+          }
+        }
+        Spacer();
+        if (notice != "") {
+          Text(notice, fontSize: FontSize.Caption, color: Colors.Success, minW: "0");
+          if (discarded != null) { Button("Undo", onPress: Undo, size: Size.Sm, tone: Tone.Ghost); }
+        } else if (mine != null) {
+          Text("Draft saved " + mine.SavedAt.ToString("HH:mm"), fontSize: FontSize.Caption, color: Colors.TextMuted,
+               fontFamily: Font.Mono, whiteSpace: WhiteSpace.Nowrap);
+          Button("Discard", onPress: Discard, size: Size.Sm, tone: Tone.Ghost);
+        }
+        Upload("Attach files", accept: "*/*", privately: true, multiple: true, onUploaded: Took, label: "Attach files",
+               color: Colors.Primary, fontWeight: FontWeight.Semibold, fontSize: FontSize.Caption, cursor: Cursor.Pointer);
+      }
+    }
+  }
+}
+
+/// The people a note may name, matching what was typed after its `@` — floated over the box. Somebody who may not be
+/// named on this record is shown with why, and cannot be picked; a note that names them anyway is refused with the
+/// same words.
+[Composable]
+component MentionMenu(List<MentionChoice> people, MentionTyping typing, Action<MentionChoice> onPick) {
+  live var q = typing.Query.ToLower().Trim();
+  live var matches = people.Where(p => q == "" || p.Name.ToLower().Contains(q)).Take(6).ToList();
+  // A name written out whole, and a space after it: the mention is made, and the menu goes.
+  live var made = typing.Query.EndsWith(" ") && people.Any(p => p.Name.ToLower() == q);
+  render {
+    if (typing.Active && !made && matches.Count > 0) {
+      // Not a dialog: the writer is still typing in the box under it, and the keyboard stays there.
+      Stack(gap: 0, position: Position.Absolute, bottom: "100%", left: "0", mb: 2, z: ZIndex.Popover, p: 2,
+            w: "min(360px, calc(100vw - 32px))", bg: Colors.Elevated, color: Colors.OnSurface, rounded: Radius.Lg,
+            shadow: Shadow.Floating, transformOrigin: "bottom left", animation: KitMenuGrow, label: "Mention someone") {
+        Text("Mention someone — they are told, and the note is theirs to read", fontSize: FontSize.Caption,
+             color: Colors.TextMuted, px: 2, pb: 1);
+        Stack(gap: 0, role: UiRole.List, label: "People to mention") {
+          foreach (var p in matches) {
+            if (p.Refusal == "") {
+              PickerRow(p.Name, p.Hint, "", () => onPick(p));
+            } else {
+              // Somebody who may not be named here is a DISABLED row, not a warning: dimmed, not pressable, and said to be
+              // unavailable (a disabled control whose role is a list item carries `aria-disabled`) — with the reason
+              // under the name, in the row's own muted ink, so it reads as why the row is off rather than as an alert.
+              Pressable(disabled: true, role: UiRole.ListItem, label: p.Name, w: "100%", px: 2, py: 2,
+                        rounded: Radius.Md, textAlign: TextAlign.Left) {
+                Stack(gap: 0, minW: "0", w: "100%") {
+                  Row(gap: 2, align: Align.Baseline, minW: "0") {
+                    Text(p.Name, fontSize: FontSize.Label, fontWeight: FontWeight.Medium, color: Colors.TextMuted);
+                    Spacer();
+                    Text(p.Hint, fontSize: FontSize.Caption, color: Colors.TextMuted, whiteSpace: WhiteSpace.Nowrap);
+                  }
+                  Text(p.Refusal, fontSize: FontSize.Caption, color: Colors.TextMuted);
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+/// One of the composer's two modes — a tab with its key.
+[Composable]
+component ComposerMode(string label, bool selected, Action onPress, string key) {
+  render {
+    Pressable(onClick: onPress, role: UiRole.Tab, selected: selected, label: label, shortcut: key,
+              px: 2, py: 1, rounded: Radius.Md, fontSize: FontSize.Label, transition: Motion.Fast,
+              fontWeight: selected ? FontWeight.Semibold : FontWeight.Medium,
+              color: selected ? Colors.OnSurface : Colors.TextMuted, bg: selected ? Colors.Muted : Colors.Transparent) {
+      Row(gap: 2, align: Align.Center) {
+        Text(label);
+        KeyHintOf(onPress);
+      }
+    }
+  }
+}
+
+/// A formatting key on the bar — a glyph set in the face of what it does, named for a screen reader and a test.
+[Composable]
+component FormatKey(string glyph, string label, Action onPress, string key, bool strong, bool slanted) {
+  render {
+    Pressable(onClick: onPress, label: label, shortcut: key, w: "28px", h: "28px", rounded: Radius.Sm,
+              color: Colors.TextSecondary, transition: Motion.Fast) {
+      Text(glyph, fontWeight: strong ? FontWeight.Bold : FontWeight.Medium, fontStyle: slanted ? FontStyle.Italic : FontStyle.Normal,
+           fontFamily: glyph == "</>" ? Font.Mono : Font.Sans,
+           fontSize: glyph == "</>" ? FontSize.Caption : (glyph == "•" ? FontSize.Heading : FontSize.Body), lineHeight: 1);
+    }
+  }
+}
+
+/// A formatting key drawn as an icon — the link.
+[Composable]
+component FormatIcon(string label, Action onPress, Icons icon) {
+  render {
+    Pressable(onClick: onPress, label: label, w: "28px", h: "28px", rounded: Radius.Sm, color: Colors.TextSecondary,
+              transition: Motion.Fast) {
+      Icon(icon, size: 16);
+    }
+  }
+}
+
+/// A labelled button on the bar — saved replies, macros, preview — with its key's chip. `labelled` is decided by the
+/// COMPOSER's width: a button measuring itself is never wide, and would lose its words on every screen.
+[Composable]
+component ComposerBarButton(string label, Icons icon, Action onPress, string key, bool open, bool labelled) {
+  render {
+    Pressable(onClick: onPress, label: label, shortcut: key, expanded: open, px: 2, h: "28px", rounded: Radius.Sm,
+              color: open ? Colors.Primary : Colors.TextSecondary, bg: open ? Colors.Primary.Subtle : Colors.Transparent,
+              transition: Motion.Fast) {
+      Row(gap: 1, align: Align.Center) {
+        Icon(icon, size: 15);
+        if (labelled) {
+          Text(label, fontSize: FontSize.Caption, fontWeight: FontWeight.Medium);
+          KeyHintOf(onPress);
+        }
+      }
+    }
+  }
+}

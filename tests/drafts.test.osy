@@ -1,0 +1,119 @@
+// DRAFTS — the writer's own, per record, surviving a reload; a prepared draft is offered and never sent by itself;
+// sending signs a reply (never a note) and hands "send and set" to the app.
+using Osysharp.Identity;
+using Osysharp.ReplyComposer;
+using Osysharp.Storage;
+using ComposerKitTests;
+
+[Test(Building)]
+[runas(Ada)]
+void a_draft_with_its_files_and_staged_steps_is_there_when_the_composer_opens_again() {
+  var request = RequestId(101);
+  var shot = KeepComposerFile("", Uploaded("radiator.png",
+    [137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13], "image/png"));
+  Assert.True(shot.Picture);
+  Assert.NotNull(SaveDraft("", request, "The fitter says **Thursday**.", false, [shot],
+                           [new StagedStep { Action = "ComposerKitTests.SetRequestStatus", Parameter = "status", Choice = "Waiting", Label = "Set status: Waiting on the tenant" }]));
+  // A reload: everything comes back from the server, nothing from the page.
+  var opened = OpenComposer("", request);
+  Assert.Equal("The fitter says **Thursday**.", opened.Text);
+  Assert.Equal("radiator.png", opened.Files.Single().Name);
+  Assert.Equal("Set status: Waiting on the tenant", opened.Steps.Single().Label);
+  Assert.NotNull(opened.SavedAt);
+  // Another record has its own.
+  Assert.Equal("", OpenComposer("", RequestId(102)).Text);
+  // Emptied, the draft is gone — not kept as an empty row.
+  Assert.Null(SaveDraft("", request, "  ", false, [], []));
+  Assert.Equal(0, ComposerDraft.Count());
+}
+
+// SECURITY-INVARIANT(composer-draft-is-its-authors) — guarded here.
+[Test(Building)]
+void a_writers_draft_is_theirs_alone() {
+  var request = RequestId(101);
+  runas (Ada) { SaveDraft("", request, "Between us: the boiler is older than the building.", true, [], []); }
+  runas (Raj) {
+    Assert.Equal(0, ComposerDraft.Count());
+    Assert.Equal("", OpenComposer("", request).Text);
+    // His own lives beside hers.
+    SaveDraft("", request, "On it.", false, [], []);
+    Assert.Equal(1, ComposerDraft.Count());
+  }
+  // ⭐ THE COUNTERPART — Ada still reads her own, so Raj's zero is the rule, not drafts that nobody can read.
+  runas (Ada) {
+    Assert.Equal(1, ComposerDraft.Count());
+    Assert.Equal("Between us: the boiler is older than the building.", OpenComposer("", request).Text);
+  }
+  runas (Tom) { Assert.Equal(0, ComposerDraft.Count()); }
+}
+
+[Test(Building)]
+[runas(Ada)]
+void sending_signs_a_reply_never_a_note_and_deletes_the_draft() {
+  var request = RequestId(101);
+  SaveDraft("", request, "A fitter comes tomorrow.", false, [], []);
+  SendFromComposer("", request, "A fitter comes tomorrow.", false, [], "", -1, true, []);
+  Assert.Equal("A fitter comes tomorrow.\n\nAda Lindqvist  \nFacilities, Kestrel House", RequestReply.Single().Text);
+  Assert.Equal(0, ComposerDraft.Count());
+  SendFromComposer("", request, "Boiler is ancient.", true, [], "", -1, true, []);
+  Assert.Equal("Boiler is ancient.", RequestReply.Single(x => x.Note).Text);
+  // Left off by the writer, it is not added.
+  SendFromComposer("", request, "Thanks!", false, [], "", -1, false, []);
+  Assert.Equal("Thanks!", RequestReply.OrderByDescending(x => x.At).First().Text);
+}
+
+[Test(Building)]
+[runas(Ada)]
+void send_and_set_is_the_apps_choice_and_a_refused_send_keeps_the_draft() {
+  var request = RequestId(102);
+  var sent = SendFromComposer("", request, "The engineer is booked for 14:00.", false, [], "Waiting", -1, true, []);
+  Assert.Equal("Sent, and set to Waiting on the tenant.", sent.Said);
+  Assert.Equal(RequestStatus.Waiting, Request.Single(r => r.Id == request).Status);
+  // The app refuses a reply over one that arrived while the writer wrote — `seen` is what they had on screen (0).
+  SaveDraft("", request, "Booked for 14:00!", false, [], []);
+  var refused = Assert.Throws<ValidationException>(() =>
+    SendFromComposer("", request, "Booked for 14:00!", false, [], "", 0, true, []));
+  Assert.Contains("Somebody replied while you were writing", refused.Message);
+  Assert.Equal("Booked for 14:00!", OpenComposer("", request).Text);
+}
+
+[Test(Building)]
+void a_prepared_draft_is_offered_to_whoever_writes_next_and_never_sent_by_itself() {
+  var request = RequestId(101);
+  Guid prepared = Guid.Empty;
+  runas (Ada) { prepared = PrepareDraft("", request, "Hi Hanna, a fitter can come Thursday morning.", "Building assistant"); }
+  runas (Raj) {
+    var offer = OpenComposer("", request).Prepared!;
+    Assert.Equal("Building assistant", offer.By);
+    Assert.Equal(0, RequestReply.Count());
+    // Taken, it is his to edit — and gone from offer, so two people never send it twice.
+    Assert.Equal("Hi Hanna, a fitter can come Thursday morning.", TakePreparedDraft(prepared).Text);
+    Assert.Null(OpenComposer("", request).Prepared);
+    Assert.Throws<ValidationException>(() => TakePreparedDraft(prepared));
+  }
+}
+
+[Test(Building)]
+[runas(Ada)]
+void a_file_over_the_limit_is_refused_with_its_size_and_the_limit() {
+  var big = new byte[2100000];
+  var refused = Assert.Throws<ValidationException>(() =>
+    KeepComposerFile("", Uploaded("boiler.mov", big)));
+  Assert.Contains("boiler.mov is 2.0 MB", refused.Message);
+  Assert.Contains("at most 1.9 MB", refused.Message);
+  // Only a file just uploaded privately can be attached.
+  Assert.Throws<ValidationException>(() =>
+    KeepComposerFile("", new UploadedFile { Path = "public/logo.png", FileName = "logo.png", ContentType = "image/png" }));
+}
+
+[Test(Building)]
+void a_file_someone_else_uploaded_is_not_theirs_to_attach() {
+  UploadedFile? adas = null;
+  runas (Ada) { adas = Uploaded("radiator.png", [137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13], "image/png"); }
+  // Raj learns the path — it is still Ada's upload, not his.
+  runas (Raj) {
+    var refused = Assert.Throws<ValidationException>(() => KeepComposerFile("", adas!));
+    Assert.Contains("upload it again", refused.Message);
+  }
+  runas (Ada) { Assert.True(KeepComposerFile("", adas!).Picture); }
+}

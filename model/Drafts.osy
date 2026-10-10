@@ -1,0 +1,186 @@
+namespace Osysharp.ReplyComposer;
+
+using Osysharp.Identity;
+
+// DRAFTS — what a writer has written on a record and not sent: saved as they write, per record and per author, with
+// the files they added and the macro steps they staged, so a reload, a crash or another ticket in between loses
+// nothing. Sending deletes it; "Discard" deletes it.
+//
+// ⚑ A PREPARED DRAFT (no author) is one somebody else wrote for whoever answers the record next — an assistant, a
+//   colleague handing over. The composer OFFERS it ("Prepared by …"); taking it copies it into the writer's own draft,
+//   and nothing about it is ever sent until a person sends it. `PrepareDraft` is the one way to write one.
+
+/// A reply or note being written on a record — the writer's own, or prepared for whoever writes next.
+[Unique(Item, Author, "There is already a draft for you on this record.")]
+public entity ComposerDraft {
+  [MaxLength(40)] string Kind = "";
+  /// The record it is written on.
+  Guid Item;
+  /// Whose draft. None: PREPARED for whoever writes next (`PreparedBy` says by whom).
+  Principal? Author;
+  [MaxLength(80)] string PreparedBy = "";
+  /// Up to `DraftKeeps` characters — more than a reply may be, so a long draft is kept whole and the send says how long.
+  [Classification(Personal.Content), MaxLength(50000)] string Text = "";
+  bool Note = false;
+  DateTime SavedAt;
+  security {
+    // SECURITY-INVARIANT(composer-draft-is-its-authors): a writer's draft is read and written by that writer alone,
+    // whatever else the app grants on the record. Guarded by tests/drafts.test.osy
+    // (a_writers_draft_is_theirs_alone).
+    allow read, create, delete when ComposesReplies where Author == user || Author == null;
+    allow update when ComposesReplies where Author == user;
+  }
+}
+
+/// A file going with a draft — the writer's own, not sent yet.
+public entity ComposerDraftFile {
+  [Required] ComposerDraft Draft;
+  Guid File;
+  [MaxLength(255)] string Name = "";
+  long Size;
+  bool Picture;
+  security { allow read, create, delete when ComposesReplies where Draft.Author == user || Draft.Author == null; }
+}
+
+/// A macro step staged on a draft — runs with its send.
+public entity ComposerDraftStep {
+  [Required] ComposerDraft Draft;
+  int Position = 0;
+  /// The app's `[Action]` it runs, the parameter it chose a value for, and that value.
+  [MaxLength(200)] string Action = "";
+  [MaxLength(80)] string Parameter = "";
+  [MaxLength(200)] string Choice = "";
+  [MaxLength(200)] string Label = "";
+  security { allow read, create, delete when ComposesReplies where Draft.Author == user || Draft.Author == null; }
+}
+
+/// The most a draft holds — its column's length.
+const int DraftKeeps = 50000;
+
+/// Everything a composer opens with on a record.
+public class ComposerOpening {
+  /// True once the server has answered — what `Composer(opened:)` checks before taking it.
+  public bool Loaded;
+  public string Text = "";
+  public bool Note;
+  public List<ComposerFile> Files = [];
+  public List<StagedStep> Steps = [];
+  /// When the writer's draft was last saved — null when there is none.
+  public DateTime? SavedAt;
+  /// A draft prepared by somebody else, waiting to be taken — null when there is none.
+  public PreparedOffer? Prepared;
+  public string Signature = "";
+  public List<ComposerAfter> After = [];
+}
+
+/// A draft somebody prepared for whoever writes next.
+public class PreparedOffer {
+  public Guid Id;
+  public string By = "";
+  public string Text = "";
+  public bool Note;
+  public DateTime At;
+}
+
+/// What a composer opens with on record `item`: the writer's draft (if any), a prepared draft on offer, the writer's
+/// signature and the "send and set…" choices.
+[SuppressWarning("cost-unbounded-read")]   // one draft's files and steps
+public ComposerOpening OpenComposer(string kind, Guid item) {
+  var target = TargetFor(kind);
+  // Who is writing, by id — the request already knows it, where the writer's whole row would be a read of its own.
+  var me = Session.CurrentUser.Id;
+  var opening = new ComposerOpening { Loaded = true, Signature = target.Signature().Trim(), After = target.After(item) };
+  var mine = ComposerDraft.FirstOrDefault(d => d.Item == item && d.Author.Id == me);
+  if (mine != null) {
+    opening.Text = mine.Text;
+    opening.Note = mine.Note;
+    opening.SavedAt = mine.SavedAt;
+    opening.Files = ComposerDraftFile.Where(f => f.Draft.Id == mine.Id).ToList()
+      .Select(f => new ComposerFile { Id = f.File, Name = f.Name, Size = f.Size, Picture = f.Picture }).ToList();
+    opening.Steps = ComposerDraftStep.Where(s => s.Draft.Id == mine.Id).OrderBy(s => s.Position).ToList()
+      .Select(s => new StagedStep { Action = s.Action, Parameter = s.Parameter, Choice = s.Choice, Label = s.Label }).ToList();
+  }
+  var prepared = ComposerDraft.Where(d => d.Item == item && d.Author == null).OrderByDescending(d => d.SavedAt).FirstOrDefault();
+  if (prepared != null) {
+    opening.Prepared = new PreparedOffer { Id = prepared.Id, By = prepared.PreparedBy, Text = prepared.Text,
+                                           Note = prepared.Note, At = prepared.SavedAt };
+  }
+  return opening;
+}
+
+/// Save the writer's draft on record `item` — or delete it, when there is nothing in it. Answers when it was saved
+/// (null: there is no draft now).
+[SuppressWarning("cost-unbounded-read")]   // one draft's files and steps
+public DateTime? SaveDraft(string kind, Guid item, string text, bool note, List<ComposerFile> files, List<StagedStep> steps) {
+  var me = Session.CurrentUser!;
+  var draft = ComposerDraft.FirstOrDefault(d => d.Item == item && d.Author == me);
+  if (text.Trim() == "" && files.Count == 0 && steps.Count == 0) {
+    if (draft != null) { DeleteDraft(draft); UnitOfWork.Commit(); }
+    return null;
+  }
+  if (draft == null) { draft = new ComposerDraft { Kind = kind, Item = item, Author = me }; }
+  else {
+    foreach (var f in ComposerDraftFile.Where(x => x.Draft.Id == draft.Id).ToList()) { f.Delete(); }
+    foreach (var s in ComposerDraftStep.Where(x => x.Draft.Id == draft.Id).ToList()) { s.Delete(); }
+  }
+  // A draft longer than a reply may be is still KEPT, so nothing typed is lost; the send says how long it is. Past
+  // what a draft holds at all, saving says so rather than cutting it.
+  if (text.Length > DraftKeeps) {
+    throw new ValidationException($"This draft is {text.Length} characters — more than can be kept ({DraftKeeps}). Shorten it.");
+  }
+  draft.Text = text;
+  draft.Note = note;
+  draft.SavedAt = DateTime.UtcNow;
+  foreach (var f in files) {
+    new ComposerDraftFile { Draft = draft, File = f.Id, Name = f.Name, Size = f.Size, Picture = f.Picture };
+  }
+  var position = 0;
+  foreach (var s in steps) {
+    new ComposerDraftStep { Draft = draft, Position = position, Action = s.Action, Parameter = s.Parameter, Choice = s.Choice, Label = s.Label };
+    position = position + 1;
+  }
+  UnitOfWork.Commit();
+  return draft.SavedAt;
+}
+
+/// Throw the writer's draft on record `item` away.
+public void DiscardDraft(string kind, Guid item) {
+  var me = Session.CurrentUser!;
+  var draft = ComposerDraft.FirstOrDefault(d => d.Item == item && d.Author == me);
+  if (draft == null) { return; }
+  DeleteDraft(draft);
+  UnitOfWork.Commit();
+}
+
+[SuppressWarning("cost-unbounded-read")]   // one draft's files and steps
+void DeleteDraft(ComposerDraft draft) {
+  foreach (var f in ComposerDraftFile.Where(x => x.Draft.Id == draft.Id).ToList()) { f.Delete(); }
+  foreach (var s in ComposerDraftStep.Where(x => x.Draft.Id == draft.Id).ToList()) { s.Delete(); }
+  draft.Delete();
+}
+
+/// Prepare a draft on record `item` for whoever writes next — `by` names who prepared it ("Harbour assistant",
+/// "Rahul Kapoor"). Replaces an earlier prepared draft on the record. It is OFFERED in the composer and never sent by
+/// itself. The seam an assistant writes its suggestions through.
+[SuppressWarning("cost-unbounded-read")]   // the prepared drafts on one record — one, as each replaces the last
+public Guid PrepareDraft(string kind, Guid item, string text, string by, bool note = false) {
+  TargetFor(kind);
+  if (text.Trim() == "") { throw new ValidationException("A prepared draft needs words."); }
+  if (by.Trim() == "") { throw new ValidationException("Say who prepared it — the writer is told."); }
+  foreach (var old in ComposerDraft.Where(d => d.Item == item && d.Author == null).ToList()) { DeleteDraft(old); }
+  if (text.Length > DraftKeeps) { throw new ValidationException($"A prepared draft may be at most {DraftKeeps} characters."); }
+  var draft = new ComposerDraft { Kind = kind, Item = item, PreparedBy = by.Trim(), Note = note, SavedAt = DateTime.UtcNow,
+                                  Text = text };
+  UnitOfWork.Commit();
+  return draft.Id;
+}
+
+/// Take prepared draft `preparedId` as the writer's own: it is removed from offer, and answers its text.
+public PreparedOffer TakePreparedDraft(Guid preparedId) {
+  var p = ComposerDraft.FirstOrDefault(d => d.Id == preparedId && d.Author == null);
+  if (p == null) { throw new ValidationException("That prepared draft is gone — somebody else took it."); }
+  var offer = new PreparedOffer { Id = p.Id, By = p.PreparedBy, Text = p.Text, Note = p.Note, At = p.SavedAt };
+  DeleteDraft(p);
+  UnitOfWork.Commit();
+  return offer;
+}

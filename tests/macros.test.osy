@@ -1,0 +1,71 @@
+// MACROS — the app's own actions, staged when applied and run with the send; a step whose choice has gone is said.
+using Osysharp.Identity;
+using Osysharp.ReplyComposer;
+using ComposerKitTests;
+
+/// A step of the desk's own: "label" or "status", set to `choice`.
+StagedStep Step(string what, string choice) {
+  if (what == "label") { return new StagedStep { Action = Actions.Of(LabelRequest).Name, Parameter = "label", Choice = choice }; }
+  if (what == "status") { return new StagedStep { Action = Actions.Of(SetRequestStatus).Name, Parameter = "status", Choice = choice }; }
+  return new StagedStep { Action = what, Choice = choice };
+}
+
+[Test(Building)]
+[runas(Ada)]
+void applying_a_macro_stages_its_steps_and_the_send_runs_them_in_order() {
+  var id = SaveMacro(null, "", "Heating fixed", "Heating", "Hi {{tenant.first_name}}, the radiator is fixed.", false, true,
+                     [Step("label", "heating"), Step("status", "Done")]);
+  var request = RequestId(101);
+  var applied = ApplyMacro(id, request);
+  Assert.Equal("Hi Hanna, the radiator is fixed.", applied.Text);
+  Assert.Equal(["Add a label: heating", "Set status: Done"], applied.Steps.Select(s => s.Label).ToList());
+  // Applying changes nothing on the record — the writer may still edit the reply or take a step off.
+  Assert.Equal(RequestStatus.Open, Request.Single(r => r.Id == request).Status);
+  var sent = SendFromComposer("", request, applied.Text, false, [], "", -1, true, applied.Steps);
+  Assert.Equal("Sent. Labelled heating. Status set to Done.", sent.Said);
+  var r = Request.Single(x => x.Id == request);
+  Assert.Equal(RequestStatus.Done, r.Status);
+  Assert.Equal("heating", r.Labels);
+}
+
+[Test(Building)]
+[runas(Ada)]
+void a_macro_that_only_sets_things_applies_without_a_reply() {
+  var id = SaveMacro(null, "", "Waiting on the tenant", "", "", false, true, [Step("status", "Waiting")]);
+  var applied = ApplyMacro(id, RequestId(102));
+  Assert.Equal("", applied.Text);
+  var sent = SendFromComposer("", RequestId(102), "", false, [], "", -1, true, applied.Steps);
+  Assert.Equal("Status set to Waiting on the tenant.", sent.Said);
+  Assert.Equal(0, RequestReply.Count());
+}
+
+[Test(Building)]
+[runas(Ada)]
+void a_step_whose_choice_has_gone_is_said_when_applied_never_skipped_silently() {
+  var id = SaveMacro(null, "", "Keys cut", "Keys", "Your new keys are at reception.", false, true, [Step("label", "keys")]);
+  // The label's step is edited behind the macro's back — as a status deleted since the macro was written would be.
+  var step = MacroStep.Single(s => s.Macro.Id == id);
+  step.Choice = "locksmith";
+  UnitOfWork.Commit();
+  var applied = ApplyMacro(id, RequestId(101));
+  Assert.Equal(0, applied.Steps.Count);
+  Assert.Contains("that choice no longer exists", applied.Problems.Single());
+  // A macro is refused at save when a step names something the desk does not offer.
+  var refused = Assert.Throws<ValidationException>(() =>
+    SaveMacro(null, "", "Bad", "", "Words.", false, true, [Step("escalate", "")]));
+  Assert.Contains("not an action this desk offers", refused.Message);
+  // …and when it would do nothing at all.
+  Assert.Throws<ValidationException>(() => SaveMacro(null, "", "Empty", "", "", false, true, []));
+}
+
+[Test(Building)]
+[runas(Ada)]
+void a_step_refused_after_the_reply_went_does_not_unsend_it_and_says_so() {
+  var request = RequestId(101);
+  // A step staged by a macro that has since lost its choice — the send goes, the step is reported, not run.
+  var sent = SendFromComposer("", request, "On our way.", false, [], "", -1, true, [new StagedStep {
+    Action = "ComposerKitTests.LabelRequest", Parameter = "label", Choice = "locksmith", Label = "Add a label: locksmith" }]);
+  Assert.Equal(1, RequestReply.Count());
+  Assert.Contains("that choice no longer exists", sent.StepProblem);
+  Assert.Equal("", Request.Single(r => r.Id == request).Labels);
+}

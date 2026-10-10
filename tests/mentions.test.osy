@@ -1,0 +1,68 @@
+// MENTIONS (0.4.0) — a note names a colleague with `@` and their name: offered as the writer types, found in the words
+// when the note is sent, handed to the app as keys, and refused — with the app's reason — for somebody who may not be
+// named on the record. A reply names nobody.
+using Osysharp.Identity;
+using Osysharp.ReplyComposer;
+using ComposerKitTests;
+
+[Test(Building)]
+void typing_an_at_sign_after_a_space_starts_a_mention_and_an_address_does_not() {
+  Assert.True(MentionAt("Can @ra", 7).Active);
+  Assert.Equal("ra", MentionAt("Can @ra", 7).Query);
+  Assert.True(MentionAt("@", 1).Active);
+  Assert.False(MentionAt("mail ada@desk.test", 18).Active);
+  Assert.False(MentionAt("@raj\nthe boiler", 15).Active);
+  var picked = PickMention("Can @ra look", 7, MentionAt("Can @ra look", 7), "Raj Mehta");
+  Assert.Equal("Can @Raj Mehta  look", picked.Text);
+  Assert.Equal(15, picked.From);
+}
+
+[Test(Building)]
+void a_name_is_found_whole_and_never_inside_an_address() {
+  Assert.True(Names("@Raj Mehta, can you look?", "Raj Mehta"));
+  Assert.True(Names("Thanks @raj mehta", "Raj Mehta"));
+  Assert.False(Names("mail raj@Raj Mehta.test", "Raj Mehta"));
+  Assert.False(Names("@Raj Mehtason", "Raj Mehta"));
+  Assert.False(Names("Raj Mehta", "Raj Mehta"));
+}
+
+[Test(Building)]
+[runas(Ada)]
+void a_note_hands_the_app_who_it_names_and_a_reply_names_nobody() {
+  var request = RequestId(101);
+  SendFromComposer("", request, "@Raj Mehta can you take the radiator? @Ada Lindqvist knows the fitter.", true, [], "", -1, true, []);
+  var note = RequestReply.Single(x => x.Note);
+  Assert.Equal("raj@desk.test ada@desk.test", note.Mentioned);
+  SendFromComposer("", request, "Thanks @Raj Mehta for the help.", false, [], "", -1, true, []);
+  Assert.Equal("", RequestReply.Single(x => !x.Note).Mentioned);
+}
+
+[Test(Building)]
+[runas(Ada)]
+void a_note_naming_somebody_who_may_not_be_named_is_refused_with_the_apps_reason_and_kept() {
+  var request = RequestId(101);
+  var ex = Assert.Throws<ValidationException>(() =>
+    SendFromComposer("", request, "@Tom Berg says it is cold again.", true, [], "", -1, true, []));
+  Assert.Equal("Tom Berg is a tenant — a note is for staff only.", ex.Message);
+  Assert.Equal(0, RequestReply.Count());
+}
+
+[Test(Building)]
+void typing_at_in_a_note_offers_the_people_it_may_name_and_picking_one_writes_their_name() {
+  Ui.Viewport(1440, 900);
+  Ui.SignInAs(Ada);
+  Ui.Visit("/request/101");
+  Ui.Click("Internal note");
+  Ui.Fill("Internal note", "Can @ra");
+  Assert.Visible("Raj Mehta", within: "People to mention");
+  Assert.Hidden("Hanna Svensson", within: "People to mention");
+  Ui.Shot("composer-mention-wide-light");
+  Ui.Click("Raj Mehta");
+  Assert.Value("Internal note", "Can @Raj Mehta ");
+  // The name is written whole: the menu has gone.
+  Assert.Hidden("People to mention");
+  // A tenant is offered with why they cannot be named.
+  Ui.Fill("Internal note", "Ask @to");
+  Assert.Visible("Tom Berg is a tenant — a note is for staff only.", within: "People to mention");
+  Ui.Shot("composer-mention-refused-wide-light");
+}

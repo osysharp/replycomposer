@@ -1,0 +1,46 @@
+// FORMATTING — pure edits over the text and the writer's selection; a second press undoes the first.
+using Osysharp.ReplyComposer;
+
+[Test]
+void bold_wraps_the_selection_and_a_second_press_takes_it_off() {
+  var once = Wrap("hello world", 6, 11, "**", "bold");
+  Assert.Equal("hello **world**", once.Text);
+  Assert.Equal(8, once.From);
+  Assert.Equal(13, once.To);
+  var twice = Wrap(once.Text, once.From, once.To, "**", "bold");
+  Assert.Equal("hello world", twice.Text);
+  Assert.Equal(6, twice.From);
+  // A selection that includes the marks unwraps too.
+  Assert.Equal("hello world", Wrap("hello **world**", 6, 15, "**", "bold").Text);
+  // Nothing selected: the marks around a word that is selected, ready to type over.
+  var empty = Wrap("Hi ", 3, 3, "_", "italic");
+  Assert.Equal("Hi _italic_", empty.Text);
+  Assert.Equal("italic", empty.Text.Substring(empty.From, empty.To - empty.From));
+}
+
+[Test]
+void a_list_marks_every_line_the_selection_touches_and_numbers_count_up() {
+  var text = "Bleed the radiator\nCheck the valve\nCall us";
+  var bullets = Lines(text, 3, 25, "- ");
+  Assert.Equal("- Bleed the radiator\n- Check the valve\nCall us", bullets.Text);
+  Assert.Equal(text, Lines(bullets.Text, 0, bullets.To, "- ").Text);
+  Assert.Equal("1. Bleed the radiator\n2. Check the valve\n3. Call us", Lines(text, 0, text.Length, "1. ").Text);
+}
+
+[Test]
+void a_link_selects_the_address_to_type_over() {
+  var made = Linked("see the guide", 8, 13);
+  Assert.Equal("see the [guide](https://)", made.Text);
+  Assert.Equal("https://", made.Text.Substring(made.From, made.To - made.From));
+  // A selected address becomes the link's address, and its words are selected.
+  var url = Linked("https://kestrel.house/heating", 0, 29);
+  Assert.Equal("[link](https://kestrel.house/heating)", url.Text);
+}
+
+[Test]
+void a_saved_reply_goes_where_the_cursor_is_with_a_blank_line_around_it() {
+  Assert.Equal("Thanks!", Insert("", 0, 0, "Thanks!").Text);
+  var mid = Insert("Hi Hanna,\nBest, Ada", 10, 10, "A fitter comes tomorrow.");
+  Assert.Equal("Hi Hanna,\n\nA fitter comes tomorrow.\n\nBest, Ada", mid.Text);
+  Assert.Equal("A fitter comes tomorrow.", mid.Text.Substring(mid.From - 24, 24));
+}
