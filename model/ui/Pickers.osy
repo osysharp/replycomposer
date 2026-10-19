@@ -28,7 +28,7 @@ public bool Matches(string query, string title, string category, string body) {
 /// The saved replies for `kind`, searchable. `onPick` gets the chosen reply's id.
 [Composable]
 public component SavedReplyPicker(string kind, Action<Guid> onPick, Action onClose, string manageAt = "") {
-  live var replies = SavedReply.Where(r => r.Kind == kind).OrderBy(r => r.Category).ThenBy(r => r.Title).ToList();
+  live var replies = SavedReply.Where(r => r.Kind == kind).OrderBy(r => r.Category).ThenBy(r => r.Title).Take(500).ToList();
   live var me = Session.CurrentUser;
   string query = "";
 
@@ -42,7 +42,7 @@ public component SavedReplyPicker(string kind, Action<Guid> onPick, Action onClo
       Input(value: query, label: "Search saved replies", placeholder: "Search saved replies…", autoFocus: true,
             onEnter: TakeFirst, onEscape: onClose, w: "100%", h: Length.ControlSm, px: 2, rounded: Radius.Md, borderW: 1,
             border: Colors.Border, bg: Colors.Bg, fontSize: FontSize.Label);
-      Stack(gap: 0, maxH: "320px", overflowY: Overflow.Auto, mt: 1, role: UiRole.List, label: "Replies") {
+      Stack(gap: 0, maxH: "320px", overflowY: Overflow.Auto, mt: 1, role: (replies.Count == 0) ? UiRole.Group : UiRole.List, label: "Replies") {
         if (replies.Count == 0) {
           PickerEmpty("No saved replies yet",
                       manageAt != "" ? "Write the ones you send often in Settings › Saved replies." : "", manageAt);
@@ -61,7 +61,7 @@ public component SavedReplyPicker(string kind, Action<Guid> onPick, Action onClo
 /// The macros for `kind`, searchable. Each row says what it does — its reply and its steps — before it is applied.
 [Composable]
 public component MacroPicker(string kind, Action<Guid> onPick, Action onClose, string manageAt = "") {
-  live var macros = Macro.Where(m => m.Kind == kind).OrderBy(m => m.Category).ThenBy(m => m.Title).ToList();
+  live var macros = Macro.Where(m => m.Kind == kind).OrderBy(m => m.Category).ThenBy(m => m.Title).Take(500).ToList();
   live var steps = MacroStep.Where(s => s.Macro.Kind == kind).OrderBy(s => s.Position).ToList();
   string query = "";
 
@@ -82,7 +82,7 @@ public component MacroPicker(string kind, Action<Guid> onPick, Action onClose, s
       Input(value: query, label: "Search macros", placeholder: "Search macros…", autoFocus: true, onEnter: TakeFirst,
             onEscape: onClose, w: "100%", h: Length.ControlSm, px: 2, rounded: Radius.Md, borderW: 1, border: Colors.Border,
             bg: Colors.Bg, fontSize: FontSize.Label);
-      Stack(gap: 0, maxH: "320px", overflowY: Overflow.Auto, mt: 1, role: UiRole.List, label: "Macros list") {
+      Stack(gap: 0, maxH: "320px", overflowY: Overflow.Auto, mt: 1, role: (macros.Count == 0) ? UiRole.Group : UiRole.List, label: "Macros list") {
         if (macros.Count == 0) {
           PickerEmpty("No macros yet",
                       manageAt != "" ? "A macro writes a reply and sets things in one move — make one in Settings › Macros." : "",

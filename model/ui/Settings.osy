@@ -34,7 +34,7 @@ public component ComposerMacroSettings() { render { MacroSettings(); } }
 /// Saved replies — the team's and the reader's own — for record kind `kind`.
 [Composable]
 public component SavedReplySettings(string kind = "") {
-  live var replies = SavedReply.Where(r => r.Kind == kind).Include(r => r.Owner).OrderBy(r => r.Category).ThenBy(r => r.Title).ToList();
+  live var replies = SavedReply.Where(r => r.Kind == kind).Include(r => r.Owner).OrderBy(r => r.Category).ThenBy(r => r.Title).Take(500).ToList();
   List<PlaceholderInfo> placeholders = [];
   Dictionary<Guid, int> uses = new Dictionary<Guid, int>();
   bool editing = false;
@@ -98,7 +98,7 @@ public component SavedReplySettings(string kind = "") {
     SettingsPage("Saved replies", description: "Replies written once and sent often — find them from the reply box, under Saved replies. The team's are everyone's; your own are yours.") {
       SettingsSection("Every saved reply") {
         if (notice != "") { Text(notice, fontSize: FontSize.Caption, color: Colors.Success); }
-        Stack(gap: 0, role: UiRole.List, label: "Replies") {
+        Stack(gap: 0, role: (replies.Count == 0) ? UiRole.Group : UiRole.List, label: "Replies") {
           if (replies.Count == 0) {
             EmptyState("No saved replies yet", body: "Write the answers you give again and again once — a reply can greet the customer by name with a placeholder.");
           }
@@ -170,7 +170,7 @@ component ReplyBodyEditor(string label, Binding<string> body, Binding<int> from,
 /// Macros — the team's and the reader's own — for record kind `kind`: a reply and the steps that go with it.
 [Composable]
 public component MacroSettings(string kind = "") {
-  live var macros = Macro.Where(m => m.Kind == kind).Include(m => m.Owner).OrderBy(m => m.Category).ThenBy(m => m.Title).ToList();
+  live var macros = Macro.Where(m => m.Kind == kind).Include(m => m.Owner).OrderBy(m => m.Category).ThenBy(m => m.Title).Take(500).ToList();
   live var allSteps = MacroStep.Where(s => s.Macro.Kind == kind).OrderBy(s => s.Position).ToList();
   List<PlaceholderInfo> placeholders = [];
   List<MacroAction> actions = [];
@@ -255,7 +255,7 @@ public component MacroSettings(string kind = "") {
     SettingsPage("Macros", description: "A reply and the things that go with it, in one move — “Refund on its way” writes the reply, tags the ticket and sets it Pending. Applying one puts it in the reply box; its steps run when you send.") {
       SettingsSection("Every macro") {
         if (notice != "") { Text(notice, fontSize: FontSize.Caption, color: Colors.Success); }
-        Stack(gap: 0, role: UiRole.List, label: "Macros") {
+        Stack(gap: 0, role: (macros.Count == 0) ? UiRole.Group : UiRole.List, label: "Macros") {
           if (macros.Count == 0) {
             EmptyState("No macros yet", body: "Make one for the answer that always comes with a status change or a tag.");
           }

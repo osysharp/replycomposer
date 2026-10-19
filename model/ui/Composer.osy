@@ -68,7 +68,7 @@ public component Composer(Guid item, string kind = "", string audience = "", boo
   // THE DRAFTS ON THIS RECORD THE READER MAY SEE — their own, and one prepared for whoever writes next. Live, so "Draft
   // saved" is what the server holds (never what the page hopes it sent), and a draft an assistant prepares while the
   // page is open is offered at once.
-  live var drafts = ComposerDraft.Where(d => d.Item == item).ToList();
+  live var drafts = ComposerDraft.Where(d => d.Item == item).Take(50).ToList();   // one item's: an assistant's and a person's
   live var mine = drafts.FirstOrDefault(d => d.Author != null);
   live var prepared = drafts.Where(d => d.Author == null).OrderByDescending(d => d.SavedAt).FirstOrDefault();
 
