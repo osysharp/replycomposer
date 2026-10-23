@@ -50,6 +50,8 @@ public entity ComposerDraftStep {
   [MaxLength(200)] string Action = "";
   [MaxLength(80)] string Parameter = "";
   [MaxLength(200)] string Choice = "";
+  /// A form step's values (`StagedStep.Values`) — "" for a menu step.
+  [MaxLength(4000)] string Values = "";
   [MaxLength(200)] string Label = "";
   security { allow read, create, delete when ComposesReplies where Draft.Author == user || Draft.Author == null; }
 }
@@ -98,7 +100,7 @@ public ComposerOpening OpenComposer(string kind, Guid item) {
     opening.Files = ComposerDraftFile.Where(f => f.Draft.Id == mine.Id).ToList()
       .Select(f => new ComposerFile { Id = f.File, Name = f.Name, Size = f.Size, Picture = f.Picture }).ToList();
     opening.Steps = ComposerDraftStep.Where(s => s.Draft.Id == mine.Id).OrderBy(s => s.Position).ToList()
-      .Select(s => new StagedStep { Action = s.Action, Parameter = s.Parameter, Choice = s.Choice, Label = s.Label }).ToList();
+      .Select(s => new StagedStep { Action = s.Action, Parameter = s.Parameter, Choice = s.Choice, Values = s.Values, Label = s.Label }).ToList();
   }
   var prepared = ComposerDraft.Where(d => d.Item == item && d.Author == null).OrderByDescending(d => d.SavedAt).FirstOrDefault();
   if (prepared != null) {
@@ -136,7 +138,7 @@ public DateTime? SaveDraft(string kind, Guid item, string text, bool note, List<
   }
   var position = 0;
   foreach (var s in steps) {
-    new ComposerDraftStep { Draft = draft, Position = position, Action = s.Action, Parameter = s.Parameter, Choice = s.Choice, Label = s.Label };
+    new ComposerDraftStep { Draft = draft, Position = position, Action = s.Action, Parameter = s.Parameter, Choice = s.Choice, Values = s.Values, Label = s.Label };
     position = position + 1;
   }
   UnitOfWork.Commit();

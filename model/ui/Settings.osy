@@ -177,6 +177,9 @@ public component MacroSettings(string kind = "") {
   bool editing = false;
   bool picking = false;
   string adding = "";        // "" closed · "action" choosing an action · otherwise the action whose choice is being chosen
+  // A step set up in a form — an action that takes a date, a number, a list or several values.
+  MacroAction? forming = null;
+  MacroParamDraft[] formDrafts = [];
   Guid? editingId = null;
   string title = "";
   string body = "";
@@ -218,15 +221,26 @@ public component MacroSettings(string kind = "") {
   action StartStep() { adding = adding == "" ? "action" : ""; }
   action CloseStep() { adding = ""; }
   action ChooseAction(MacroAction v) {
-    if (v.Choices.Count == 0) { AddStep(v, ""); } else { adding = v.Name; }
+    if (v.Parameters.Count > 0) { adding = ""; forming = v; formDrafts = FormDraftsFor(v).ToArray(); problem = ""; }
+    else if (v.Choices.Count == 0) { AddStep(v, ""); } else { adding = v.Name; }
   }
+  action AddFormStep() {
+    try {
+      var next = steps.ToList();
+      next.Add(FormStep(forming!, formDrafts.ToList()));
+      steps = next;
+      forming = null;
+      problem = "";
+    } catch (Exception ex) { problem = ex.Message; }
+  }
+  action CancelForm() { forming = null; problem = ""; }
   action AddStep(MacroAction v, string choice) {
     var next = steps.ToList();
     next.Add(new StagedStep { Action = v.Name, Parameter = v.Parameter, Choice = choice, Label = StepLabel(v, choice) });
     steps = next;
     adding = "";
   }
-  action DropStep(StagedStep s) { steps = steps.Where(x => !(x.Action == s.Action && x.Choice == s.Choice)).ToList(); }
+  action DropStep(StagedStep s) { steps = steps.Where(x => !(x.Action == s.Action && x.Choice == s.Choice && x.Values == s.Values)).ToList(); }
   action Save() {
     problem = "";
     try {
@@ -293,7 +307,19 @@ public component MacroSettings(string kind = "") {
               IconButton("Remove " + s.Label, () => DropStep(s), size: Size.Sm, tone: Tone.Ghost) { Icon(Icons.Close, size: 10); }
             }
           }
-          if (actions.Count > 0) {
+          if (forming != null) {
+            Card {
+              Text(forming.Label, fontWeight: FontWeight.Medium);
+              foreach (var i in Enumerable.Range(0, formDrafts.Length)) {
+                ActionArgumentField(formDrafts[i].Parameter, formDrafts[i].Choices, formDrafts[i].Value);
+              }
+              Row(gap: 2) {
+                Button("Add the step", onPress: AddFormStep, tone: Tone.Primary, size: Size.Sm);
+                Button("Cancel", onPress: CancelForm, tone: Tone.Ghost, size: Size.Sm);
+              }
+            }
+          }
+          if (actions.Count > 0 && forming == null) {
             Box(position: Position.Relative) {
               Button("Add a step", onPress: StartStep, tone: Tone.Ghost, size: Size.Sm);
               if (adding == "action") {

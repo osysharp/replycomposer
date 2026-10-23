@@ -100,7 +100,7 @@ public component Composer(Guid item, string kind = "", string audience = "", boo
 
   /// Everything a draft holds, as one comparable string.
   string Snapshot() => text + "\u0001" + (note ? "n" : "r") + "\u0001" + string.Join(",", files.Select(f => f.Id.ToString()))
-    + "\u0001" + string.Join(",", steps.Select(s => s.Action + "=" + s.Choice));
+    + "\u0001" + string.Join(",", steps.Select(s => s.Action + "=" + s.Choice + s.Values));
 
   // ── writing ───────────────────────────────────────────────────────────────────────────────────────────────────
   action Typed() {
@@ -184,11 +184,11 @@ public component Composer(Guid item, string kind = "", string audience = "", boo
     } catch (Exception ex) { problem = ex.Message; }
   }
 
-  action Unstage(string action, string choice) {
+  action Unstage(string action, string choice, string values) {
     var gone = false;
     List<StagedStep> next = [];
     foreach (var s in steps) {
-      if (!gone && s.Action == action && s.Choice == choice) { gone = true; } else { next.Add(s); }
+      if (!gone && s.Action == action && s.Choice == choice && s.Values == values) { gone = true; } else { next.Add(s); }
     }
     steps = next;
   }
@@ -354,7 +354,7 @@ public component Composer(Guid item, string kind = "", string audience = "", boo
             Row(gap: 1, align: Align.Center, pl: 2, pr: 1, py: "2px", rounded: Radius.Pill, bg: Colors.Muted, label: s.Label) {
               Icon(Icons.Bolt, size: 12, color: Colors.Primary);
               Text(s.Label, fontSize: FontSize.Caption);
-              IconButton("Take off " + s.Label, () => Unstage(s.Action, s.Choice), size: Size.Sm, tone: Tone.Ghost) { Icon(Icons.Close, size: 10); }
+              IconButton("Take off " + s.Label, () => Unstage(s.Action, s.Choice, s.Values), size: Size.Sm, tone: Tone.Ghost) { Icon(Icons.Close, size: 10); }
             }
           }
         }
@@ -466,9 +466,9 @@ component MentionMenu(List<MentionChoice> people, MentionTyping typing, Action<M
 
 /// One of the composer's two modes — a tab with its key.
 [Composable]
-component ComposerMode(string label, bool selected, Action onPress, string key) {
+component ComposerMode(string label, bool selected, Action onPress, string shortcut) {
   render {
-    Pressable(onClick: onPress, role: UiRole.Tab, selected: selected, label: label, shortcut: key,
+    Pressable(onClick: onPress, role: UiRole.Tab, selected: selected, label: label, shortcut: shortcut,
               px: 2, py: 1, rounded: Radius.Md, fontSize: FontSize.Label, transition: Motion.Fast,
               fontWeight: selected ? FontWeight.Semibold : FontWeight.Medium,
               color: selected ? Colors.OnSurface : Colors.TextMuted, bg: selected ? Colors.Muted : Colors.Transparent) {
@@ -482,9 +482,9 @@ component ComposerMode(string label, bool selected, Action onPress, string key) 
 
 /// A formatting key on the bar — a glyph set in the face of what it does, named for a screen reader and a test.
 [Composable]
-component FormatKey(string glyph, string label, Action onPress, string key, bool strong, bool slanted) {
+component FormatKey(string glyph, string label, Action onPress, string shortcut, bool strong, bool slanted) {
   render {
-    Pressable(onClick: onPress, label: label, shortcut: key, w: "28px", h: "28px", rounded: Radius.Sm,
+    Pressable(onClick: onPress, label: label, shortcut: shortcut, w: "28px", h: "28px", rounded: Radius.Sm,
               color: Colors.TextSecondary, transition: Motion.Fast) {
       Text(glyph, fontWeight: strong ? FontWeight.Bold : FontWeight.Medium, fontStyle: slanted ? FontStyle.Italic : FontStyle.Normal,
            fontFamily: glyph == "</>" ? Font.Mono : Font.Sans,
@@ -507,9 +507,9 @@ component FormatIcon(string label, Action onPress, Icons icon) {
 /// A labelled button on the bar — saved replies, macros, preview — with its key's chip. `labelled` is decided by the
 /// COMPOSER's width: a button measuring itself is never wide, and would lose its words on every screen.
 [Composable]
-component ComposerBarButton(string label, Icons icon, Action onPress, string key, bool open, bool labelled) {
+component ComposerBarButton(string label, Icons icon, Action onPress, string shortcut, bool open, bool labelled) {
   render {
-    Pressable(onClick: onPress, label: label, shortcut: key, expanded: open, px: 2, h: "28px", rounded: Radius.Sm,
+    Pressable(onClick: onPress, label: label, shortcut: shortcut, expanded: open, px: 2, h: "28px", rounded: Radius.Sm,
               color: open ? Colors.Primary : Colors.TextSecondary, bg: open ? Colors.Primary.Subtle : Colors.Transparent,
               transition: Motion.Fast) {
       Row(gap: 1, align: Align.Center) {

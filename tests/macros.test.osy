@@ -69,3 +69,35 @@ void a_step_refused_after_the_reply_went_does_not_unsend_it_and_says_so() {
   Assert.Contains("that choice no longer exists", sent.StepProblem);
   Assert.Equal("", Request.Single(r => r.Id == request).Labels);
 }
+
+// ── ⭐ A STEP SET UP IN A FORM — an action that takes a date, a number and a list, which the macro editor used to leave
+//    out altogether (it offered only an action with one value picked from a menu). Its values are read as the send
+//    will read them when the step is made, and they run with the send.
+[Test(Building)]
+[runas(Ada)]
+void a_macro_step_set_up_in_a_form_runs_its_date_number_and_list_with_the_send() {
+  var visitName = Actions.Of(PromiseVisit).Name;
+  var visit = ActionsFor("").Single(a => a.Name == visitName);
+  Assert.Equal(3, visit.Parameters.Count);
+  var drafts = FormDraftsFor(visit);
+  drafts[0].Value = "next tuesday";
+  drafts[1].Value = "3";
+  drafts[2].Value = "[\"ladder\", \"keys\"]";
+  // A date the action cannot read is refused when the step is made — in words, naming the parameter.
+  var refused = Assert.Throws<ValidationException>(() => FormStep(visit, drafts));
+  Assert.Contains("On is a date", refused.Message);
+  drafts[0].Value = "2026-11-02";
+  var step = FormStep(visit, drafts);
+  Assert.Equal("Promise a visit: 2026-11-02, 3, ladder, keys", step.Label);
+
+  var id = SaveMacro(null, "", "Visit booked", "", "We will come by.", false, true, [step]);
+  var request = RequestId(101);
+  var applied = ApplyMacro(id, request);
+  Assert.Equal(0, applied.Problems.Count);
+  var sent = SendFromComposer("", request, applied.Text, false, [], "", -1, true, applied.Steps);
+  Assert.Contains("Visit promised for 2026-11-02.", sent.Said);
+  var r = Request.Single(x => x.Id == request);
+  Assert.Equal(new DateOnly(2026, 11, 2), r.VisitOn);
+  Assert.Equal(3, r.VisitHours);
+  Assert.Equal("ladder, keys", r.Bring);
+}

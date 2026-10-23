@@ -40,6 +40,10 @@ entity Request {
   [MaxLength(20)] string Unit = "";
   RequestStatus Status = RequestStatus.Open;
   [MaxLength(200)] string Labels = "";
+  /// The visit promised — set by `PromiseVisit`, an action that takes a date, a number and a list.
+  DateOnly? VisitOn;
+  int VisitHours = 0;
+  [MaxLength(200)] string Bring = "";
   security { allow read, create, update when IsStaff; }
 }
 
@@ -135,6 +139,16 @@ public string LabelRequest(Request r, [Label("Label")] [Choices(LabelChoices)] s
   if (!(" " + r.Labels + " ").Contains(" " + label + " ")) { r.Labels = (r.Labels + " " + label).Trim(); }
   UnitOfWork.Commit();
   return "Labelled " + label + ".";
+}
+
+/// Promise a visit — on a day, for so many hours, bringing these. A macro's step set up in a form.
+[Action("Promise a visit")]
+public string PromiseVisit(Request r, [Label("On")] DateOnly on, [Label("Hours")] int hours, [Label("Bring")] List<string> bring) {
+  r.VisitOn = on;
+  r.VisitHours = hours;
+  r.Bring = string.Join(", ", bring);
+  UnitOfWork.Commit();
+  return "Visit promised for " + on.ToString("yyyy-MM-dd") + ".";
 }
 
 /// The labels this desk uses.

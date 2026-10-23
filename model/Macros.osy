@@ -42,6 +42,9 @@ public entity MacroStep {
   /// The parameter the value is for — "" for an action that takes nothing but the record.
   [MaxLength(80)] string Parameter = "";
   [MaxLength(200)] string Choice = "";
+  /// Every value a step set up in a form gives its action — a date, a number, a list — as `[[parameter, value], …]`;
+  /// "" for a step picked from a menu, whose one value is `Choice`.
+  [MaxLength(4000)] string Values = "";
   /// "Set status: Pending" — as it read when chosen, so a step whose choice has gone can still say what it was.
   [MaxLength(200)] string Label = "";
   security {
@@ -56,6 +59,8 @@ public class StagedStep {
   public string Action = "";
   public string Parameter = "";
   public string Choice = "";
+  /// A step set up in a form: every value it gives its action, as `[[parameter, value], …]` — "" for a menu step.
+  public string Values = "";
   /// "Set status: Pending".
   public string Label = "";
 }
@@ -66,9 +71,19 @@ public class MacroAction {
   public string Name = "";
   /// "Set status" — a step reads "Set status: Pending".
   public string Label = "";
-  /// The parameter a choice is made for — "" for an action that takes nothing but the record.
+  /// The parameter a choice is made for — "" for an action that takes nothing but the record, or a form.
   public string Parameter = "";
   public List<ActionChoice> Choices = [];
+  /// The parameters a FORM asks for — an action that takes a date, a number, a list, or more than one value. Empty for
+  /// a menu step and for an action that takes nothing but the record.
+  public List<ActionParameter> Parameters = [];
+}
+
+/// One parameter of a step being set up in a form: what it is, what it offers, and what has been given so far.
+public class MacroParamDraft {
+  public ActionParameter Parameter;
+  public List<ActionChoice> Choices = [];
+  public string Value = "";
 }
 
 /// What applying a macro puts in the composer.
@@ -84,25 +99,88 @@ public class AppliedMacro {
 }
 
 /// The actions a macro for `kind` may run, with their choices as they are now, for the writer: the app's `[Action]`s
-/// on the record this composer writes on, that it offers — each taking at most one choice beside the record.
+/// on the record this composer writes on, that it offers. One that takes a single choice beside the record is picked
+/// from a menu; one that takes anything else — a date, a number, a list, several values — is set up in a form.
+///
+/// ⚑ EVERY ACTION, NOT ONLY THE MENU-SHAPED ONES. This offered only an action with at most one value, and only when
+///   that value was a choice, so "Promise a visit on <date>" could never be a macro's step at all.
 public List<MacroAction> ActionsFor(string kind) {
   var target = TargetFor(kind);
   List<MacroAction> all = [];
   if (target.Record == "") { return all; }
   foreach (var a in Actions.Catalog().Where(x => x.Subject == target.Record && target.Offers(x))) {
     var rest = a.Parameters.Where(p => !p.Subject).ToList();
-    if (rest.Count > 1) { continue; }
     if (rest.Count == 0) { all.Add(new MacroAction { Name = a.Name, Label = a.Label }); continue; }
-    var p = rest[0];
-    List<ActionChoice> choices = p.ChoicesFromData ? Actions.Choices(a.Name, p.Name) : p.Choices;
-    if (p.Kind == ActionParameterKind.YesNo) {
-      choices = [new ActionChoice { Key = "true", Label = "Yes" }, new ActionChoice { Key = "false", Label = "No" }];
+    if (rest.Count == 1 && !rest[0].Optional) {
+      var p = rest[0];
+      List<ActionChoice> choices = p.ChoicesFromData ? Actions.Choices(a.Name, p.Name) : p.Choices;
+      if (p.Kind == ActionParameterKind.YesNo) {
+        choices = [new ActionChoice { Key = "true", Label = "Yes" }, new ActionChoice { Key = "false", Label = "No" }];
+      }
+      if (choices.Count > 0) {
+        all.Add(new MacroAction { Name = a.Name, Label = a.Label, Parameter = p.Name, Choices = choices });
+        continue;
+      }
     }
-    // A step is chosen from a menu — an action whose value is free text is the automations' to run, not a macro's.
-    if (choices.Count == 0) { continue; }
-    all.Add(new MacroAction { Name = a.Name, Label = a.Label, Parameter = p.Name, Choices = choices });
+    all.Add(new MacroAction { Name = a.Name, Label = a.Label, Parameters = rest });
   }
   return all;
+}
+
+/// A draft per parameter of a form step, a required choice preselected.
+public List<MacroParamDraft> FormDraftsFor(MacroAction action) {
+  List<MacroParamDraft> drafts = [];
+  foreach (var p in action.Parameters) {
+    List<ActionChoice> choices = p.ChoicesFromData ? Actions.Choices(action.Name, p.Name) : p.Choices;
+    drafts.Add(new MacroParamDraft { Parameter = p, Choices = choices, Value = choices.Count > 0 && !p.Optional ? choices[0].Key : "" });
+  }
+  return drafts;
+}
+
+/// A form step from its drafts — or the reason it cannot be one, read exactly as the send will read it.
+public StagedStep FormStep(MacroAction action, List<MacroParamDraft> drafts) {
+  List<ActionValue> values = [];
+  List<string> said = [];
+  foreach (var d in drafts) {
+    var v = d.Value.Trim();
+    if (v == "") { continue; }
+    values.Add(new ActionValue { Parameter = d.Parameter.Name, Value = v });
+    var choice = d.Choices.FirstOrDefault(c => c.Key == v);
+    said.Add(choice != null ? choice.Label
+           : d.Parameter.Kind == ActionParameterKind.YesNo ? (v == "true" ? "yes" : "no")
+           : d.Parameter.Kind == ActionParameterKind.Sequence ? ListWords(v) : v);
+  }
+  var wrong = Actions.Check(action.Name, values);
+  if (wrong != "") { throw new ValidationException(wrong); }
+  return new StagedStep { Action = action.Name, Values = ValuesJson(values),
+                          Label = said.Count == 0 ? action.Label : action.Label + ": " + string.Join(", ", said) };
+}
+
+/// A list written as JSON, as a person reads it — `["ladder", "keys"]` is "ladder, keys". A list of anything but
+/// words stays as written.
+public string ListWords(string json) {
+  try { return string.Join(", ", JsonSerializer.Deserialize<List<string>>(json)); }
+  catch (Exception e) { return json; }
+}
+
+/// Values as a step keeps them: `[[parameter, value], …]`.
+public string ValuesJson(List<ActionValue> values) {
+  List<List<string>> pairs = [];
+  foreach (var v in values) { pairs.Add([v.Parameter, v.Value]); }
+  return JsonSerializer.Serialize(pairs);
+}
+
+/// What a step gives its action, the record aside — a form step's values, or a menu step's one choice.
+public List<ActionValue> StepValues(StagedStep s) {
+  List<ActionValue> values = [];
+  if (s.Values != "") {
+    foreach (var pair in JsonSerializer.Deserialize<List<List<string>>>(s.Values)) {
+      values.Add(new ActionValue { Parameter = pair[0], Value = pair[1] });
+    }
+  } else if (s.Parameter != "") {
+    values.Add(new ActionValue { Parameter = s.Parameter, Value = s.Choice });
+  }
+  return values;
 }
 
 /// "Set status: Pending" — or the action's label alone when it takes no choice.
@@ -112,14 +190,24 @@ public string StepLabel(MacroAction action, string choice) {
   return action.Label + ": " + c.Label;
 }
 
-/// Why a step cannot run as written on `kind` — "" when it can.
-public string StepProblem(string kind, string actionName, string choice, string label) {
-  var action = ActionsFor(kind).FirstOrDefault(a => a.Name == actionName);
-  if (action == null) { return $"\"{label}\" cannot run — this desk no longer has that action."; }
-  if (action.Parameter != "" && !action.Choices.Any(c => c.Key == choice)) {
-    return $"\"{label}\" cannot run — that choice no longer exists. Edit the macro to choose again.";
+/// Why a step cannot run as written on `kind` — "" when it can. A form step's values are read as the send will read
+/// them (`Actions.Check`), so a value the action can no longer take is said here, not when the reply has gone.
+public string StepProblem(string kind, StagedStep s) {
+  var action = ActionsFor(kind).FirstOrDefault(a => a.Name == s.Action);
+  if (action == null) { return $"\"{s.Label}\" cannot run — this desk no longer has that action."; }
+  if (s.Values == "" && action.Parameter != "" && !action.Choices.Any(c => c.Key == s.Choice)) {
+    return $"\"{s.Label}\" cannot run — that choice no longer exists. Edit the macro to choose again.";
+  }
+  if (s.Values != "" || action.Parameters.Count > 0) {
+    var wrong = Actions.Check(s.Action, StepValues(s));
+    if (wrong != "") { return $"\"{s.Label}\" cannot run — {wrong} Edit the macro to set it again."; }
   }
   return "";
+}
+
+/// Why a menu step — `actionName` with `choice`, labelled `label` — cannot run on `kind`; "" when it can.
+public string StepProblem(string kind, string actionName, string choice, string label) {
+  return StepProblem(kind, new StagedStep { Action = actionName, Choice = choice, Label = label });
 }
 
 /// Macro `macroId`, applied to record `item`: its reply filled, its runnable steps staged, and a sentence for each that
@@ -131,9 +219,10 @@ public AppliedMacro ApplyMacro(Guid macroId, Guid item) {
   var filled = Fill(m.Kind, m.Body, item);
   var applied = new AppliedMacro { Title = m.Title, Text = filled.Text, Note = m.AsNote, Unfilled = filled.Unfilled };
   foreach (var s in MacroStep.Where(x => x.Macro.Id == m.Id).OrderBy(x => x.Position).ToList()) {
-    var problem = StepProblem(m.Kind, s.Action, s.Choice, s.Label);
+    var staged = new StagedStep { Action = s.Action, Parameter = s.Parameter, Choice = s.Choice, Values = s.Values, Label = s.Label };
+    var problem = StepProblem(m.Kind, staged);
     if (problem != "") { applied.Problems.Add(problem); continue; }
-    applied.Steps.Add(new StagedStep { Action = s.Action, Parameter = s.Parameter, Choice = s.Choice, Label = s.Label });
+    applied.Steps.Add(staged);
   }
   new ComposerUse { What = m.Id, Macro = true, By = Session.CurrentUser!, At = DateTime.UtcNow };
   UnitOfWork.Commit();
@@ -146,12 +235,12 @@ public AppliedMacro ApplyMacro(Guid macroId, Guid item) {
 public List<string> RunSteps(string kind, Guid item, List<StagedStep> steps) {
   List<string> done = [];
   foreach (var s in steps) {
-    var problem = StepProblem(kind, s.Action, s.Choice, s.Label);
+    var problem = StepProblem(kind, s);
     if (problem != "") { throw new ValidationException(problem); }
     var info = Actions.Find(s.Action)!;
     var subject = info.Parameters.First(p => p.Subject);
     List<ActionValue> values = [new ActionValue { Parameter = subject.Name, Value = item.ToString() }];
-    if (s.Parameter != "") { values.Add(new ActionValue { Parameter = s.Parameter, Value = s.Choice }); }
+    values.AddRange(StepValues(s));
     var result = Actions.Run(s.Action, values);
     if (result.Outcome != ActionOutcome.Done) { throw new ValidationException($"\"{s.Label}\" was not done: {result.Problem}"); }
     done.Add(result.Said != "" ? result.Said : s.Label + ".");
@@ -174,8 +263,12 @@ public Guid SaveMacro(Guid? id, string kind, string title, string category, stri
   foreach (var s in steps) {
     var action = actions.FirstOrDefault(a => a.Name == s.Action);
     if (action == null) { throw new ValidationException($"\"{s.Action}\" is not an action this desk offers."); }
-    if (action.Parameter != "" && !action.Choices.Any(c => c.Key == s.Choice)) {
+    if (s.Values == "" && action.Parameter != "" && !action.Choices.Any(c => c.Key == s.Choice)) {
       throw new ValidationException($"Choose what \"{action.Label}\" sets.");
+    }
+    if (s.Values != "" || action.Parameters.Count > 0) {
+      var wrong = Actions.Check(s.Action, StepValues(s));
+      if (wrong != "") { throw new ValidationException(wrong); }
     }
   }
   Macro m;
@@ -195,7 +288,7 @@ public Guid SaveMacro(Guid? id, string kind, string title, string category, stri
   foreach (var s in steps) {
     var action = actions.First(a => a.Name == s.Action);
     new MacroStep { Macro = m, Position = position, Action = s.Action, Parameter = action.Parameter, Choice = s.Choice,
-                    Label = StepLabel(action, s.Choice) };
+                    Values = s.Values, Label = s.Values != "" ? s.Label : StepLabel(action, s.Choice) };
     position = position + 1;
   }
   UnitOfWork.Commit();
@@ -215,5 +308,5 @@ public void RemoveMacro(Guid id) {
 [SuppressWarning("cost-unbounded-read")]   // one macro's steps
 public List<StagedStep> StepsOf(Guid macroId) {
   return MacroStep.Where(x => x.Macro.Id == macroId).OrderBy(x => x.Position).ToList()
-    .Select(s => new StagedStep { Action = s.Action, Parameter = s.Parameter, Choice = s.Choice, Label = s.Label }).ToList();
+    .Select(s => new StagedStep { Action = s.Action, Parameter = s.Parameter, Choice = s.Choice, Values = s.Values, Label = s.Label }).ToList();
 }

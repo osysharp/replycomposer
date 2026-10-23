@@ -173,3 +173,28 @@ void the_settings_refuse_a_placeholder_nobody_declared_and_insert_a_declared_one
   Ui.Click("Save");
   Assert.Visible("Set status: Waiting on the tenant", within: "Every macro");
 }
+
+// ── ⭐ A MACRO STEP THAT TAKES A DATE, A NUMBER AND A LIST is set up in a form, each value in the input its kind takes.
+[Test(Building)]
+void a_macro_step_that_takes_a_date_a_number_and_a_list_is_set_up_in_a_form() {
+  Ui.Viewport(1440, 900);
+  Ui.SignInAs(Ada);
+  Ui.Visit("/settings/macros");
+  Ui.Click("Add a macro");
+  Ui.Fill("Title", "Visit booked");
+  Ui.Click("Add a step");
+  Ui.Click("Promise a visit");
+  Assert.Visible("A whole number.");
+  Assert.Visible("Several values, written as a JSON list.");
+  Ui.Fill("On", "2026-11-02");
+  Ui.Fill("Hours", "3");
+  Ui.Fill("Bring", "ladder");
+  Ui.Click("Add the step");
+  Assert.Visible("Bring is not written as it should be");
+  Ui.Fill("Bring", "[\"ladder\"]");
+  Ui.Click("Add the step");
+  Assert.Visible("Promise a visit: 2026-11-02, 3, ladder", within: "Steps");
+  Ui.Shot("settings-macro-form-step-wide-light");
+  Ui.Click("Save");
+  Assert.Visible("Promise a visit: 2026-11-02, 3, ladder", within: "Every macro");
+}
