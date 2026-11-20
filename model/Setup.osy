@@ -21,7 +21,7 @@ public class ComposerSetup {
   public List<ComposerTarget> Targets = [];
   /// The largest file a writer may add, in bytes. Over it they are told which file, how big, and the limit. An
   /// organisation's policy may bound it for every app it runs.
-  [OrgPolicy(OrgPolicyMode.Range)] public long MaxFileBytes = 10485760;
+  [OrgPolicy(OrgPolicyMode.Range, Name = "Reply attachment size (bytes)")] public long MaxFileBytes = 10485760;
   /// How long a reply may be — a draft over it is refused when sent, with the count.
   public int MaxLength = 20000;
 }
